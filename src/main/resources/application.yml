@@ -1,6 +1,9 @@
 spring:
   application:
     name: consultas-operacoes-credito
+  config:
+    # Catálogo de campos por bloco (ADR-0005)
+    import: classpath:catalogo-campos.yml
   threads:
     virtual:
       enabled: true
