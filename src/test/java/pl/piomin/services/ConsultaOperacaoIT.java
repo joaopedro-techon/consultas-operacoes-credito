@@ -9,6 +9,8 @@ import org.springframework.http.MediaType;
 import org.springframework.test.json.JsonCompareMode;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * Testes de caixa-preta da consulta OPERACAO na visão consolidada: só a API HTTP é observada.
  */
@@ -49,5 +51,18 @@ class ConsultaOperacaoIT {
                           }
                         }]}
                         """, JsonCompareMode.STRICT);
+    }
+
+    @Test
+    void operacaoInexistenteDevolve404EmProblemDetails() {
+        client.get().uri(ROTA + "?id_operacao=999999999")
+                .header("x-tipo-consulta", "OPERACAO")
+                .exchange()
+                .expectStatus().isNotFound()
+                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(404)
+                .jsonPath("$.title").isEqualTo("Operação de crédito não encontrada")
+                .jsonPath("$.detail").value(String.class, detail -> assertThat(detail).contains("999999999"));
     }
 }
