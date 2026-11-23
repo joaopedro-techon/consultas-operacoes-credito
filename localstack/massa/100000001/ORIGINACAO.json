@@ -1,1 +1,5 @@
-{"id_operacao":100000001,"canal_contratacao":"MOBILE","dependencia_contabil":"004"}
+{
+  "id_operacao": 100000001,
+  "canal_contratacao": "MOBILE",
+  "dependencia_contabil": "004"
+}
