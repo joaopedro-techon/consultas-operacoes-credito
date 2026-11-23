@@ -15,8 +15,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Teste isolado porque os blocos padrão desta versão ({@code operacao} e {@code originacao}) não têm
- * campos decimais, então a tipagem decimal ainda não é observável pela API HTTP.
+ * Teste isolado porque a escala e a precisão do {@code BigDecimal} (75.0 vs 75) e a rejeição de payload
+ * corrompido não são observáveis de forma confiável pela API HTTP (comparações JSON tratam números como double).
  */
 class TextoDetalheCodecTest {
 
