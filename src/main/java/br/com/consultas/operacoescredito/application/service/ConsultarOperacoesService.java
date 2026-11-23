@@ -8,11 +8,15 @@ import br.com.consultas.operacoescredito.domain.OperacaoConsultada;
 import br.com.consultas.operacoescredito.domain.OperacaoNaoEncontradaException;
 import br.com.consultas.operacoescredito.domain.catalogo.CatalogoDeCampos;
 import br.com.consultas.operacoescredito.domain.filtro.FiltroDeOperacoes;
+import br.com.consultas.operacoescredito.domain.selecao.SelecaoDeCampos;
 
 import java.util.List;
 import java.util.Objects;
 
-/** Implementação do caso de uso de consulta; sem dependência de framework (ligada em {@code config}). */
+/**
+ * Implementação do caso de uso de consulta; sem dependência de framework (ligada em {@code config}).
+ * Valida a seleção de campos antes de ir à fonte e a aplica ao que a fonte devolveu, qualquer que seja ela.
+ */
 public class ConsultarOperacoesService implements ConsultarOperacoesUseCase {
 
     private final FonteDeOperacoes fonte;
@@ -29,10 +33,11 @@ public class ConsultarOperacoesService implements ConsultarOperacoesUseCase {
         var filtro = consulta.filtro()
                 .map(expressao -> FiltroDeOperacoes.compilar(expressao, catalogo, consulta.blocos()))
                 .orElse(FiltroDeOperacoes.NENHUM);
+        var selecao = SelecaoDeCampos.de(consulta.campos(), consulta.blocos(), catalogo);
         var operacoes = fonte.buscar(consulta.criterio(), consulta.blocos());
         if (operacoes.isEmpty() && consulta.criterio() instanceof CriterioConsulta.PorOperacao porOperacao) {
             throw new OperacaoNaoEncontradaException(porOperacao.idOperacao());
         }
-        return filtro.aplicar(operacoes);
+        return filtro.aplicar(operacoes).stream().map(selecao::aplicar).toList();
     }
 }

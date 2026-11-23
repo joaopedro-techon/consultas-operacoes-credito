@@ -203,6 +203,18 @@ class FiltroRsqlIT {
     }
 
     @Test
+    void filtroEmCampoForaDoFieldsFiltraAntesDaSelecao() {
+        client.get().uri(ROTA + "?id_operacao={id}&expand=parcelas&fields={fields}&filter={filter}", OPERACAO,
+                        "parcelas.numero_parcela_amortizacao", "parcelas.situacao_parcela==LIQUIDADA")
+                .header("x-tipo-consulta", "OPERACAO")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.data[0].parcelas[*].numero_parcela_amortizacao").isEqualTo(List.of(1, 2, 3, 4, 5))
+                .jsonPath("$.data[0].parcelas[0].situacao_parcela").doesNotExist();
+    }
+
+    @Test
     void filtroVazioNaoFiltra() {
         consultar(OPERACAO, "parcelas", "")
                 .expectStatus().isOk()

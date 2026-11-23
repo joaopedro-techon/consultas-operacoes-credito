@@ -37,10 +37,11 @@ class OperacoesCreditoController {
             @RequestParam(name = ParametrosConsulta.CONTA, required = false) String conta,
             @RequestParam(name = ParametrosConsulta.LIMITE_OPERACOES, required = false) String limiteOperacoes,
             @RequestParam(name = ParametrosConsulta.EXPAND, required = false) String expand,
+            @RequestParam(name = ParametrosConsulta.FIELDS, required = false) String fields,
             @RequestParam(name = ParametrosConsulta.FILTER, required = false) String filter) {
-        var parametros = new ParametrosConsulta(tipoConsulta, idOperacao, cpfCnpj, conta, limiteOperacoes, expand);
-        var operacoes = consultarOperacoes.consultar(
-                new Consulta(parametros.criterio(), parametros.blocos(), FiltroRsql.traduzir(filter)));
+        var parametros = new ParametrosConsulta(tipoConsulta, idOperacao, cpfCnpj, conta, limiteOperacoes, expand, fields);
+        var operacoes = consultarOperacoes.consultar(new Consulta(
+                parametros.criterio(), parametros.blocos(), parametros.campos(), FiltroRsql.traduzir(filter)));
         var resposta = ResponseEntity.ok();
         blocosIndisponiveis(operacoes).ifPresent(blocos -> resposta.header(HEADER_BLOCOS_INDISPONIVEIS, blocos));
         return resposta.body(ConsultaResponse.de(operacoes));

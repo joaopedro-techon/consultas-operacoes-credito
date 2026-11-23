@@ -12,7 +12,8 @@ import br.com.consultas.operacoescredito.domain.catalogo.CatalogoDeCampos;
 class CasosDeUsoConfig {
 
     @Bean
-    ConsultarOperacoesUseCase consultarOperacoesUseCase(FonteDeOperacoes visaoConsolidada, CatalogoDeCampos catalogo) {
-        return new ConsultarOperacoesService(visaoConsolidada, catalogo);
+    ConsultarOperacoesUseCase consultarOperacoesUseCase(FonteDeOperacoes visaoConsolidada,
+                                                        CatalogoDeCampos catalogoDeCampos) {
+        return new ConsultarOperacoesService(visaoConsolidada, catalogoDeCampos);
     }
 }
