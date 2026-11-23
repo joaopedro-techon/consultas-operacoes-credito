@@ -46,6 +46,17 @@ x-blocos-indisponiveis: plano,saldo
 - Só os blocos pedidos são lidos do DynamoDB (um `BatchGetItem` com uma chave por bloco).
 - Bloco pedido e ainda ausente na visão consolidada: chave com `null` e o bloco listado em
   `x-blocos-indisponiveis` (ordem canônica). Blocos-lista vazios (`[]`) não são indisponíveis.
+- `filter`: RSQL avaliado em memória sobre o que a fonte devolveu, com seletor `<bloco>.<campo>` (caminho com
+  ponto em campos aninhados) e comparação pelo tipo do catálogo. Operadores `==`, `!=`, `=lt=`/`<`, `=le=`/`<=`,
+  `=gt=`/`>`, `=ge=`/`>=`, `=in=(a,b)`, `=out=(a,b)`; `;` é "e", `,` é "ou", parênteses agrupam. Ex.:
+  `filter=parcelas.numero_parcela_amortizacao=ge=4;parcelas.situacao_parcela==ABERTA`.
+  - Cada condição filtra só a sua lista: os itens do bloco-lista ou, em bloco-objeto, a primeira lista do
+    caminho (`saldo.saldo_parcelas.saldo_devedor=gt=0`). Listas mais internas valem se algum item atende.
+  - Em `operacao`/`originacao` a operação que não atende sai de `data` (consulta por operação: `{"data": []}`).
+  - Campo nulo ou ausente só atende a `!=` e `=out=`; texto e booleano aceitam só `==`, `!=`, `=in=`, `=out=`.
+  - 400: sintaxe inválida, bloco ou campo fora do catálogo, bloco fora do `expand`, campo composto, argumento
+    fora do tipo, campo de primeiro nível de bloco-objeto que não seja `operacao`/`originacao`, ou `,` (ou)
+    misturando listas diferentes.
 
 | Situação | Status |
 | --- | --- |
@@ -65,7 +76,7 @@ estrutura (`objeto` ou `lista`) e os campos com nome, tipo e `anulavel` (ADR-000
 `saldo.saldo_parcelas`). Os blocos continuam trafegando como `Map`, com decimais em `BigDecimal`.
 
 O catálogo é validado na subida (um bloco por `Bloco`, `id_operacao` numérico em todo bloco, compostos com
-subcampos, nomes únicos) e será usado por `fields` e `filter`. Incluir ou remover campo = editar o YAML;
+subcampos, nomes únicos) e valida e tipa o `filter` (e será usado por `fields`). Incluir ou remover campo = editar o YAML;
 o teste `CatalogoDeCamposMassaTest` garante que a massa local usa exatamente os campos e tipos do catálogo.
 
 ## Contexto da requisição e logs
