@@ -13,7 +13,7 @@ import java.util.regex.Pattern;
  *     <li>CPF ou CNPJ (numérico ou alfanumérico) soltos no texto, com ou sem pontuação, desde que o dígito
  *     verificador seja válido.</li>
  * </ol>
- * CPF/CNPJ mantêm os 3 primeiros e os 2 últimos caracteres; conta mantém só os 4 últimos.
+ * CPF/CNPJ mantêm os 3 primeiros e os 2 últimos caracteres (sem a pontuação); conta mantém só os 4 últimos.
  */
 public final class MascaramentoDadosPessoais {
 
@@ -58,7 +58,7 @@ public final class MascaramentoDadosPessoais {
         var semPares = substituir(PAR_CHAVE_VALOR.matcher(texto), m -> m.group(1) + m.group(2)
                 + (CAMPOS_CONTA.contains(m.group(1).toLowerCase()) ? mascararConta(m.group(3)) : mascararDocumento(m.group(3))));
         return substituir(DOCUMENTO_SOLTO.matcher(semPares),
-                m -> documentoValido(m.group(1)) ? mascararDocumento(m.group(1)) : m.group(1));
+                m -> documentoValido(m.group(1)) ? mascararDocumento(semPontuacao(m.group(1))) : m.group(1));
     }
 
     private static String substituir(Matcher matcher, Function<Matcher, String> substituto) {
@@ -84,8 +84,12 @@ public final class MascaramentoDadosPessoais {
         return "*".repeat(conta.length() - 4) + conta.substring(conta.length() - 4);
     }
 
+    private static String semPontuacao(String documento) {
+        return NAO_ALFANUMERICO.matcher(documento).replaceAll("");
+    }
+
     private static boolean documentoValido(String candidato) {
-        var limpo = NAO_ALFANUMERICO.matcher(candidato).replaceAll("");
+        var limpo = semPontuacao(candidato);
         return switch (limpo.length()) {
             case 11 -> cpfValido(limpo);
             case 14 -> cnpjValido(limpo);
