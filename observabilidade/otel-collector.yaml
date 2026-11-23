@@ -1,0 +1,92 @@
+# OpenTelemetry Collector: único destino OTLP da aplicação. Trocar de fornecedor (ex.: Datadog)
+# é trocar os exporters abaixo; o código da aplicação não muda.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+
+  # Decide por trace inteiro, depois que ele termina: guarda 100% dos traces com erro ou lentos
+  # (acima do P99 alvo de cada tipo de consulta) e ~10% do resto.
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 50000
+    expected_new_traces_per_sec: 100
+    policies:
+      - name: erros
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: respostas-5xx
+        type: string_attribute
+        string_attribute:
+          key: status
+          values: ["5.."]
+          enabled_regex_matching: true
+      - name: lentas-operacao
+        type: and
+        and:
+          and_sub_policy:
+            - name: tipo-operacao
+              type: string_attribute
+              string_attribute:
+                key: tipo_consulta
+                values: [OPERACAO]
+            - name: acima-de-80ms
+              type: latency
+              latency:
+                threshold_ms: 80
+      - name: lentas-cliente-conta
+        type: and
+        and:
+          and_sub_policy:
+            - name: tipo-cliente-conta
+              type: string_attribute
+              string_attribute:
+                key: tipo_consulta
+                values: [CLIENTE, CONTA]
+            - name: acima-de-200ms
+              type: latency
+              latency:
+                threshold_ms: 200
+      - name: amostra-do-resto
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+  batch:
+    send_batch_size: 1024
+    timeout: 5s
+
+exporters:
+  # Prometheus raspa este endpoint (observabilidade/prometheus.yml)
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, tail_sampling, batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
