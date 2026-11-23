@@ -17,6 +17,8 @@ A massa é derivada de uma especificação curta (OPERACOES, abaixo) para que os
   um controle final com o IOF ainda devido e não pago;
 - operação LIQUIDADA quando todas as parcelas estão liquidadas, com data_baixa = último recebimento.
 
+Ao final, gera os stubs de trancode da fonte primária com localstack/gerar_trancode.py (requer PyYAML).
+
 Para incluir uma operação, acrescente uma entrada em OPERACOES e rode o script. Várias operações podem
 compartilhar cpf_cnpj e conta (consultas CLIENTE e CONTA). Blocos listados em "sem_blocos" não são
 gerados (bloco indisponível na visão consolidada).
@@ -27,6 +29,8 @@ import pathlib
 import re
 import shutil
 from decimal import ROUND_HALF_EVEN, Decimal
+
+import gerar_trancode
 
 DATA_POSICAO = dt.date(2026, 11, 23)
 CENTAVO = Decimal("0.01")
@@ -289,6 +293,8 @@ def main():
         for bloco, conteudo in gerar(spec).items():
             diretorio.joinpath(f"{bloco}.json").write_text(para_json(conteudo), encoding="utf-8", newline="\n")
         print(f"{spec['id']} gerada")
+    # Stubs de trancode da fonte primária derivados da mesma massa (mantém as duas fontes coerentes)
+    gerar_trancode.main()
 
 
 if __name__ == "__main__":
