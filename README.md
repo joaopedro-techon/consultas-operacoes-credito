@@ -18,7 +18,7 @@ Organização hexagonal em `br.com.consultas.operacoescredito`:
 
 | Pacote | Conteúdo |
 | --- | --- |
-| `domain` | `Bloco`, `TipoConsulta`, `CriterioConsulta`, `OperacaoConsultada` e o catálogo de campos em `domain.catalogo` (sem framework) |
+| `domain` | `Bloco`, `TipoConsulta`, `CriterioConsulta`, `OperacaoConsultada`, o catálogo de campos em `domain.catalogo` e a seleção de campos em `domain.selecao` (sem framework) |
 | `application` | Caso de uso `ConsultarOperacoesUseCase` e porta de saída `FonteDeOperacoes` (sem framework) |
 | `adapters.in.web` | Controller, validação dos parâmetros, Problem Details |
 | `adapters.out.dynamodb` | Visão consolidada (ADR-0001) |
@@ -46,6 +46,11 @@ x-blocos-indisponiveis: plano,saldo
 - Só os blocos pedidos são lidos do DynamoDB (um `BatchGetItem` com uma chave por bloco).
 - Bloco pedido e ainda ausente na visão consolidada: chave com `null` e o bloco listado em
   `x-blocos-indisponiveis` (ordem canônica). Blocos-lista vazios (`[]`) não são indisponíveis.
+- `fields`: `bloco.campo` separados por vírgula, com ponto também para campos aninhados
+  (ex.: `fields=operacao.situacao_operacao_credito,saldo.saldo_parcelas.saldo_devedor`). Bloco sem campos
+  listados volta completo; `id_operacao` volta sempre, em todo item de todo nível onde existe (`fields=operacao.id_operacao`
+  reduz `operacao` a `{"id_operacao": ...}`); campo composto listado inteiro volta completo. A seleção é aplicada
+  pelo caso de uso ao que a fonte devolveu, então vale para qualquer rota e tipo de consulta.
 
 | Situação | Status |
 | --- | --- |
@@ -54,6 +59,7 @@ x-blocos-indisponiveis: plano,saldo
 | Operação inexistente | 404 (Problem Details) |
 | `x-tipo-consulta` ausente/inválido, `id_operacao` ausente/não numérico, parâmetro incoerente com o tipo (`cpf_cnpj`, `conta` ou `limite_operacoes` em `OPERACAO`; `id_operacao` em `CLIENTE`/`CONTA`) | 400 (Problem Details) |
 | Bloco desconhecido no `expand` (inclusive maiúsculas ou item vazio) | 400 (Problem Details listando os blocos válidos) |
+| `fields` malformado, com bloco desconhecido, bloco fora do `expand` (sem expansão implícita) ou campo fora do catálogo | 400 (Problem Details listando blocos ou campos válidos) |
 | `CLIENTE` ou `CONTA` com parâmetros coerentes | 501 (ainda não disponível) |
 
 ## Catálogo de campos
@@ -65,7 +71,7 @@ estrutura (`objeto` ou `lista`) e os campos com nome, tipo e `anulavel` (ADR-000
 `saldo.saldo_parcelas`). Os blocos continuam trafegando como `Map`, com decimais em `BigDecimal`.
 
 O catálogo é validado na subida (um bloco por `Bloco`, `id_operacao` numérico em todo bloco, compostos com
-subcampos, nomes únicos) e será usado por `fields` e `filter`. Incluir ou remover campo = editar o YAML;
+subcampos, nomes únicos) e valida o `fields` (e será usado pelo `filter`). Incluir ou remover campo = editar o YAML;
 o teste `CatalogoDeCamposMassaTest` garante que a massa local usa exatamente os campos e tipos do catálogo.
 
 ## Contexto da requisição e logs
