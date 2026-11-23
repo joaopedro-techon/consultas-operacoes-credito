@@ -1,0 +1,20 @@
+name: consultas-operacoes-credito
+
+services:
+  localstack:
+    # Última tag Community que sobe sem auth token (ADR-0003). Uso exclusivo em desenvolvimento local.
+    image: localstack/localstack:4.14.0
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: dynamodb
+      AWS_DEFAULT_REGION: sa-east-1
+      CONSULTAS_DYNAMODB_TABELA: operacoes-credito
+    volumes:
+      - ./localstack/init/ready.d:/etc/localstack/init/ready.d:ro
+      - ./localstack/massa:/etc/localstack/massa:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/init/ready | grep -q '\"completed\": true'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
