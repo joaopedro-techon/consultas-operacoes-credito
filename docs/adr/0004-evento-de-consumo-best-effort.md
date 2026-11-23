@@ -1,0 +1,3 @@
+# Evento de consumo publicado em best-effort
+
+Cada consulta gera um evento de consumo enviado ao SQS (e dali, por outro serviço, a Firehose → S3 → Athena). O envio é assíncrono, em lote, a partir de uma fila em memória limitada; se o SQS falhar ou a fila encher, o evento é descartado e contado numa métrica, e a requisição nunca falha nem espera por isso. Escolhemos isso em vez de um outbox transacional porque o evento serve a analytics, onde perder uma fração mínima é aceitável, enquanto a latência da consulta (P99 de 80/200 ms) não é negociável. CPF/CNPJ e conta vão como HMAC-SHA256, nunca em claro.

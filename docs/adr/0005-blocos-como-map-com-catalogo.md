@@ -1,0 +1,3 @@
+# Blocos trafegam como Map, com catálogo de campos em YAML
+
+Os blocos não têm classes Java por campo: o `texto_detalhe` do DynamoDB e o trancode da fonte primária viram `Map<String, Object>`, e `fields`/`filter` operam direto sobre esse Map. Um catálogo YAML declara os campos válidos e o tipo de cada um por bloco; é ele que valida a requisição (400 para campo desconhecido) e tipa as comparações do filtro. Escolhemos isso em vez de records tipados para que incluir ou remover um campo seja editar configuração, sem mudar código. Decimais são sempre `BigDecimal` e datas permanecem string no formato da origem.
