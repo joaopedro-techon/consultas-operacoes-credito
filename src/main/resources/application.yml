@@ -29,6 +29,10 @@ management:
     health:
       probes:
         enabled: true
+  tracing:
+    sampling:
+      # 100% na aplicação: quem decide o que guardar é o tail sampling do OpenTelemetry Collector
+      probability: 1.0
 
 consultas:
   dynamodb:
