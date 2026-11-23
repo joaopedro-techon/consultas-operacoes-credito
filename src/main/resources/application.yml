@@ -38,3 +38,6 @@ consultas:
     tabela: ${CONSULTAS_DYNAMODB_TABELA:operacoes-credito}
     regiao: ${AWS_REGION:sa-east-1}
     endpoint: ${CONSULTAS_DYNAMODB_ENDPOINT:}
+    # GSIs esparsos por cliente e por conta (ADR-0001)
+    indice-cliente: ${CONSULTAS_DYNAMODB_INDICE_CLIENTE:gsi-cliente}
+    indice-conta: ${CONSULTAS_DYNAMODB_INDICE_CONTA:gsi-conta}

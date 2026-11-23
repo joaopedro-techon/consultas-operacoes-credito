@@ -25,11 +25,6 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return problema(HttpStatus.BAD_REQUEST, "Requisição inválida", e.getMessage());
     }
 
-    @ExceptionHandler(TipoConsultaNaoImplementadoException.class)
-    ProblemDetail tipoNaoImplementado(TipoConsultaNaoImplementadoException e) {
-        return problema(HttpStatus.NOT_IMPLEMENTED, "Tipo de consulta não disponível", e.getMessage());
-    }
-
     @ExceptionHandler(Exception.class)
     ProblemDetail erroInesperado(Exception e) {
         LOG.error("Erro inesperado na consulta", e);
