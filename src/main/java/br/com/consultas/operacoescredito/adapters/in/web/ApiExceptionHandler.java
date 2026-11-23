@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 import br.com.consultas.operacoescredito.domain.OperacaoNaoEncontradaException;
+import br.com.consultas.operacoescredito.domain.filtro.FiltroInvalidoException;
 
 /** Todos os erros em Problem Details (RFC 9457). */
 @RestControllerAdvice
@@ -22,6 +23,11 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(RequisicaoInvalidaException.class)
     ProblemDetail requisicaoInvalida(RequisicaoInvalidaException e) {
+        return problema(HttpStatus.BAD_REQUEST, "Requisição inválida", e.getMessage());
+    }
+
+    @ExceptionHandler(FiltroInvalidoException.class)
+    ProblemDetail filtroInvalido(FiltroInvalidoException e) {
         return problema(HttpStatus.BAD_REQUEST, "Requisição inválida", e.getMessage());
     }
 

@@ -21,6 +21,7 @@
         <java.version>25</java.version>
         <aws-sdk.version>2.59.7</aws-sdk.version>
         <archunit.version>1.5.1</archunit.version>
+        <rsql-parser.version>2.3.3</rsql-parser.version>
     </properties>
 
     <dependencyManagement>
@@ -51,6 +52,12 @@
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>context-propagation</artifactId>
+        </dependency>
+        <!-- Fork mantido do cz.jirutka.rsql:rsql-parser (sem release desde 2016); mesma API e pacote. -->
+        <dependency>
+            <groupId>io.github.nstdio</groupId>
+            <artifactId>rsql-parser</artifactId>
+            <version>${rsql-parser.version}</version>
         </dependency>
 
         <dependency>

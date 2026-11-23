@@ -26,6 +26,7 @@ record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj
     static final String CONTA = "conta";
     static final String LIMITE_OPERACOES = "limite_operacoes";
     static final String EXPAND = "expand";
+    static final String FILTER = "filter";
 
     /** Parâmetro que identifica o que se consulta em cada tipo de consulta. */
     private static final Map<TipoConsulta, String> IDENTIFICADOR = new EnumMap<>(Map.of(
