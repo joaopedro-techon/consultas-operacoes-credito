@@ -5,6 +5,8 @@ set -euo pipefail
 
 export TABELA="${CONSULTAS_DYNAMODB_TABELA:-operacoes-credito}"
 export MASSA_DIR="${MASSA_DIR:-/etc/localstack/massa}"
+# awslocal e boto3 precisam usar a mesma região
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
 gsi() {
   local nome="$1" pk="$2"
@@ -41,7 +43,7 @@ CODIGO_EXPAND = {"OPERACAO": 1, "ORIGINACAO": 2, "COMPONENTES": 3, "PARCELAS": 4
                  "RECEBIMENTOS": 6, "PLANO": 7, "SALDO": 8, "CONTROLES_IOF": 9}
 
 dynamodb = boto3.client("dynamodb", endpoint_url="http://localhost:4566",
-                        region_name=os.environ.get("AWS_DEFAULT_REGION", "sa-east-1"),
+                        region_name=os.environ["AWS_DEFAULT_REGION"],
                         aws_access_key_id="test", aws_secret_access_key="test")
 tabela = os.environ["TABELA"]
 agora = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")

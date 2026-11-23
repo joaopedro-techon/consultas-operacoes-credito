@@ -7,9 +7,6 @@ spring:
   mvc:
     problemdetails:
       enabled: true
-  jackson:
-    deserialization:
-      use-big-decimal-for-floats: true
   lifecycle:
     timeout-per-shutdown-phase: 30s
 
