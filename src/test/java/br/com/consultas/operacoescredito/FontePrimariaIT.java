@@ -65,6 +65,17 @@ class FontePrimariaIT {
     }
 
     @Test
+    void selecaoDeCamposNaFontePrimariaDevolveOMesmoJsonDaVisaoConsolidada() {
+        var uri = "?id_operacao=100000004&expand=parcelas,saldo"
+                + "&fields=operacao.situacao_operacao_credito,parcelas.situacao_parcela,saldo.saldo_devedor_operacao";
+
+        var fontePrimaria = corpoDaUri(ROTA_FONTE_PRIMARIA + uri);
+
+        assertThat(fontePrimaria).contains("situacao_parcela").doesNotContain("data_vencimento_parcela");
+        assertThat(fontePrimaria).isEqualTo(corpoDaUri(ROTA_VISAO_CONSOLIDADA + uri));
+    }
+
+    @Test
     void blocoAusenteNaFontePrimariaVemNuloEListadoNoHeader() {
         consultar(ROTA_FONTE_PRIMARIA, "100000003", "saldo,parcelas,plano,recebimentos")
                 .expectStatus().isOk()
@@ -223,6 +234,15 @@ class FontePrimariaIT {
 
     private RestClient adminWireMock() {
         return RestClient.create(FontePrimariaContainers.urlWireMock(wireMock));
+    }
+
+    private String corpoDaUri(String uri) {
+        return client.get().uri(uri)
+                .header("x-tipo-consulta", "OPERACAO")
+                .exchange()
+                .expectStatus().isOk()
+                .returnResult(String.class)
+                .getResponseBody();
     }
 
     private String corpo(String rota, String idOperacao, String expand) {
