@@ -56,6 +56,10 @@ Bloco pedido que a visão consolidada ainda não tem para a operação; volta `n
 Configuração que declara, por bloco, os campos válidos e o tipo de cada um (número, decimal, data, data-hora, texto, booleano, objeto, lista). Valida `fields`/`filter` e tipa as comparações do filtro (ADR-0005).
 _Avoid_: schema, modelo
 
+**Seleção de campos**:
+Campos de cada bloco que o consumidor quer ver, pedidos em `fields` como `bloco.campo` (com ponto para campos aninhados). Bloco sem campos selecionados volta completo; `id_operacao` volta sempre.
+_Avoid_: projeção, filtro de campos
+
 **Tipo de consulta**:
 Critério de busca: OPERACAO (por `id_operacao`), CLIENTE (por CPF/CNPJ) ou CONTA (por conta).
 
