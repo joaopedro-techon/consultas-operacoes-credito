@@ -1,5 +1,6 @@
 package br.com.consultas.operacoescredito.adapters.out.dynamodb;
 
+import io.micrometer.observation.ObservationRegistry;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.util.StringUtils;
@@ -16,9 +17,10 @@ import java.net.URI;
 class DynamoDbConfig {
 
     @Bean
-    DynamoDbClient dynamoDbClient(DynamoDbProperties properties) {
+    DynamoDbClient dynamoDbClient(DynamoDbProperties properties, ObservationRegistry observationRegistry) {
         var builder = DynamoDbClient.builder()
                 .region(Region.of(properties.regiao()))
+                .overrideConfiguration(c -> c.addExecutionInterceptor(new ObservacaoDynamoDbInterceptor(observationRegistry)))
                 .credentialsProvider(credenciais(properties.credenciais()));
         if (StringUtils.hasText(properties.endpoint())) {
             builder.endpointOverride(URI.create(properties.endpoint()));
