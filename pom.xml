@@ -11,7 +11,7 @@
         <relativePath/>
     </parent>
 
-    <groupId>pl.piomin.services</groupId>
+    <groupId>br.com.consultas</groupId>
     <artifactId>consultas-operacoes-credito</artifactId>
     <version>1.0.0</version>
     <name>consultas-operacoes-credito</name>

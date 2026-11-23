@@ -9,7 +9,7 @@ blocos padrão `operacao` e `originacao`.
 ## Stack
 
 Java 25, Spring Boot 4.2 (Spring MVC com virtual threads), AWS SDK v2 síncrono, Maven (com wrapper).
-Organização hexagonal em `pl.piomin.services`:
+Organização hexagonal em `br.com.consultas.operacoescredito`:
 
 | Pacote | Conteúdo |
 | --- | --- |
