@@ -9,6 +9,7 @@ import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -20,7 +21,7 @@ import java.util.stream.Collectors;
  * e converte o pedido em {@link CriterioConsulta}.
  */
 record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj, String conta,
-                          String limiteOperacoes, String expand) {
+                          String limiteOperacoes, String expand, String fields) {
 
     static final String HEADER_TIPO_CONSULTA = "x-tipo-consulta";
     static final String ID_OPERACAO = "id_operacao";
@@ -28,6 +29,7 @@ record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj
     static final String CONTA = "conta";
     static final String LIMITE_OPERACOES = "limite_operacoes";
     static final String EXPAND = "expand";
+    static final String FIELDS = "fields";
 
     /** Parâmetro que identifica o que se consulta em cada tipo de consulta. */
     private static final Map<TipoConsulta, String> IDENTIFICADOR = new EnumMap<>(Map.of(
@@ -96,6 +98,17 @@ record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj
             blocos.add(Bloco.porNome(nomeLimpo).orElseThrow(() -> blocoDesconhecido(nomeLimpo)));
         }
         return blocos;
+    }
+
+    /**
+     * Itens do {@code fields} (lista separada por vírgula, {@code bloco.campo}), sem espaços nas pontas.
+     * Ausente ou vazio: nenhum. A validação contra o catálogo é do caso de uso.
+     */
+    List<String> campos() {
+        if (fields == null || fields.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(fields.split(",", -1)).map(String::strip).toList();
     }
 
     private static RequisicaoInvalidaException blocoDesconhecido(String nome) {

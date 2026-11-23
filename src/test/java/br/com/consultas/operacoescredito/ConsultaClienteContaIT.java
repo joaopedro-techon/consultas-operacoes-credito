@@ -118,6 +118,25 @@ class ConsultaClienteContaIT {
     }
 
     @Test
+    void fieldsSelecionaCamposEmTodasAsOperacoesDoCliente() {
+        consultar("CONTA", "conta=434115000077712&expand=saldo"
+                + "&fields=operacao.data_contratacao_operacao,saldo.saldo_devedor_operacao")
+                .expectStatus().isOk()
+                .expectBody().json("""
+                        {"data": [
+                          {"operacao": {"id_operacao": 100000004, "data_contratacao_operacao": "2026-08-05"},
+                           "originacao": {"id_operacao": 100000004, "canal_contratacao": "AGENCIA",
+                                          "dependencia_contabil": "031"},
+                           "saldo": {"id_operacao": 100000004, "saldo_devedor_operacao": 39200.00}},
+                          {"operacao": {"id_operacao": 100000005, "data_contratacao_operacao": "2026-02-10"},
+                           "originacao": {"id_operacao": 100000005, "canal_contratacao": "INTERNET",
+                                          "dependencia_contabil": "031"},
+                           "saldo": {"id_operacao": 100000005, "saldo_devedor_operacao": 0.00}}
+                        ]}
+                        """, JsonCompareMode.STRICT);
+    }
+
+    @Test
     void clienteComMaisDeCemChavesDeBlocosDevolveTodosOsBlocosDeTodasAsOperacoes() {
         var ids = IntStream.iterate(100000114, id -> id >= 100000101, id -> id - 1).boxed().toList();
         consultar("CLIENTE", "cpf_cnpj=11222333000181"
