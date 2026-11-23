@@ -13,6 +13,13 @@ spring:
 server:
   shutdown: graceful
 
+logging:
+  structured:
+    format:
+      console: ecs
+    json:
+      customizer: br.com.consultas.operacoescredito.config.observabilidade.MascaramentoLogCustomizer
+
 management:
   endpoints:
     web:

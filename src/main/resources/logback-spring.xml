@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Logs JSON (structured logging ECS do Spring Boot, ver logging.structured.* no application.yml)
+escritos por um appender assíncrono: a thread da requisição só enfileira o evento.
+Perfil human-logs: texto legível para desenvolvimento local.
+-->
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <springProfile name="!human-logs">
+        <include resource="org/springframework/boot/logging/logback/structured-console-appender.xml"/>
+    </springProfile>
+    <springProfile name="human-logs">
+        <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+    </springProfile>
+
+    <appender name="ASYNC_CONSOLE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>8192</queueSize>
+        <!-- 0: não descarta eventos por nível enquanto houver espaço na fila -->
+        <discardingThreshold>0</discardingThreshold>
+        <!-- fila cheia descarta em vez de bloquear a requisição -->
+        <neverBlock>true</neverBlock>
+        <maxFlushTime>5000</maxFlushTime>
+        <appender-ref ref="CONSOLE"/>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="ASYNC_CONSOLE"/>
+    </root>
+</configuration>
