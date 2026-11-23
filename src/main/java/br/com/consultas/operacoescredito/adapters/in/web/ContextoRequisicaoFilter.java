@@ -1,0 +1,144 @@
+package br.com.consultas.operacoescredito.adapters.in.web;
+
+import br.com.consultas.operacoescredito.domain.TipoConsulta;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.servlet.HandlerExceptionResolver;
+
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+/**
+ * Resolve o contexto da requisição antes de qualquer processamento: {@code x-correlationid}
+ * (validado ou gerado), {@code x-consumidor}, tipo de consulta e rota vão para o MDC, o
+ * correlationId volta no header da resposta e, ao final, sai um log de acesso e o MDC é limpo.
+ */
+@Component
+@Order(Ordered.HIGHEST_PRECEDENCE)
+class ContextoRequisicaoFilter extends OncePerRequestFilter {
+
+    static final String HEADER_CORRELATION_ID = "x-correlationid";
+    static final String HEADER_CONSUMIDOR = "x-consumidor";
+    static final String MDC_CORRELATION_ID = "correlation_id";
+    static final String MDC_CONSUMIDOR = "consumidor";
+    static final String MDC_TIPO_CONSULTA = "tipo_consulta";
+    static final String MDC_ROTA = "rota";
+
+    private static final Logger ACESSO = LoggerFactory.getLogger("acesso");
+    private static final Pattern CORRELATION_ID_VALIDO = Pattern.compile("[A-Za-z0-9-]{1,64}");
+    private static final String CONSUMIDOR_DESCONHECIDO = "desconhecido";
+    private static final String TIPO_INVALIDO = "invalido";
+    private static final List<String> BLOCOS_SEMPRE = List.of("operacao", "originacao");
+    private static final Set<String> TIPOS_VALIDOS = Arrays.stream(TipoConsulta.values())
+            .map(Enum::name)
+            .collect(Collectors.toUnmodifiableSet());
+
+    private final HandlerExceptionResolver resolvedorDeErros;
+
+    ContextoRequisicaoFilter(@Qualifier("handlerExceptionResolver") HandlerExceptionResolver resolvedorDeErros) {
+        this.resolvedorDeErros = resolvedorDeErros;
+    }
+
+    @Override
+    protected boolean shouldNotFilter(HttpServletRequest request) {
+        return request.getRequestURI().startsWith(request.getContextPath() + "/actuator");
+    }
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+            throws ServletException, IOException {
+        var inicio = System.nanoTime();
+        var correlationIdRecebido = request.getHeader(HEADER_CORRELATION_ID);
+        var correlationIdValido = correlationIdRecebido == null || CORRELATION_ID_VALIDO.matcher(correlationIdRecebido).matches();
+        var correlationId = correlationIdRecebido != null && correlationIdValido
+                ? correlationIdRecebido
+                : UUID.randomUUID().toString();
+        try {
+            MDC.put(MDC_CORRELATION_ID, correlationId);
+            MDC.put(MDC_CONSUMIDOR, consumidor(request));
+            putSeInformado(MDC_TIPO_CONSULTA, tipoConsulta(request));
+            MDC.put(MDC_ROTA, rota(request));
+            response.setHeader(HEADER_CORRELATION_ID, correlationId);
+
+            if (correlationIdValido) {
+                chain.doFilter(request, response);
+            } else {
+                resolvedorDeErros.resolveException(request, response, null, new RequisicaoInvalidaException(
+                        "Header " + HEADER_CORRELATION_ID + " inválido: use até 64 caracteres [A-Za-z0-9-]"));
+            }
+        } finally {
+            registrarAcesso(request, response, inicio);
+            MDC.clear();
+        }
+    }
+
+    private static void registrarAcesso(HttpServletRequest request, HttpServletResponse response, long inicio) {
+        var duracaoMs = (System.nanoTime() - inicio) / 1_000_000;
+        var log = ACESSO.atInfo()
+                .addKeyValue("metodo", request.getMethod())
+                .addKeyValue("uri", request.getRequestURI())
+                .addKeyValue("blocos", blocos(request))
+                .addKeyValue("status", response.getStatus())
+                .addKeyValue("duracao_ms", duracaoMs);
+        for (var parametro : List.of(ParametrosConsulta.ID_OPERACAO, ParametrosConsulta.CPF_CNPJ,
+                ParametrosConsulta.CONTA, ParametrosConsulta.LIMITE_OPERACOES, "fields", "filter")) {
+            var valor = request.getParameter(parametro);
+            if (valor != null) {
+                log = log.addKeyValue(parametro, valor);
+            }
+        }
+        log.log("Requisição atendida");
+    }
+
+    /** Blocos pedidos: {@code operacao} e {@code originacao} sempre, mais os do {@code expand}. */
+    private static List<String> blocos(HttpServletRequest request) {
+        var blocos = new LinkedHashSet<>(BLOCOS_SEMPRE);
+        var expand = request.getParameter("expand");
+        if (expand != null) {
+            Arrays.stream(expand.split(","))
+                    .map(String::strip)
+                    .filter(bloco -> !bloco.isEmpty())
+                    .forEach(blocos::add);
+        }
+        return List.copyOf(blocos);
+    }
+
+    private static String consumidor(HttpServletRequest request) {
+        var consumidor = request.getHeader(HEADER_CONSUMIDOR);
+        return consumidor == null || consumidor.isBlank() ? CONSUMIDOR_DESCONHECIDO : consumidor.strip();
+    }
+
+    private static String tipoConsulta(HttpServletRequest request) {
+        var tipo = request.getHeader(ParametrosConsulta.HEADER_TIPO_CONSULTA);
+        if (tipo == null || tipo.isBlank()) {
+            return null;
+        }
+        return TIPOS_VALIDOS.contains(tipo) ? tipo : TIPO_INVALIDO;
+    }
+
+    private static String rota(HttpServletRequest request) {
+        return request.getRequestURI().endsWith("/fonte-primaria") ? "fonte_primaria" : "visao_consolidada";
+    }
+
+    private static void putSeInformado(String chave, String valor) {
+        if (valor != null) {
+            MDC.put(chave, valor);
+        }
+    }
+}
