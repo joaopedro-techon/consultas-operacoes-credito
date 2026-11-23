@@ -42,7 +42,7 @@ class ConsultaOperacaoIT {
                           "operacao": {
                             "id_operacao": 100000001,
                             "situacao_operacao_credito": "ATIVA",
-                            "data_contratacao_operacao": "2026-11-21",
+                            "data_contratacao_operacao": "2026-05-21",
                             "data_baixa_operacao": null,
                             "cpf_cnpj": "52998224725"
                           },
