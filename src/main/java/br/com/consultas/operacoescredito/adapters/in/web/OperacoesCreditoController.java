@@ -8,10 +8,19 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import br.com.consultas.operacoescredito.application.port.in.Consulta;
 import br.com.consultas.operacoescredito.application.port.in.ConsultarOperacoesUseCase;
+import br.com.consultas.operacoescredito.domain.Bloco;
+import br.com.consultas.operacoescredito.domain.OperacaoConsultada;
+
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/v1/operacoes-credito")
 class OperacoesCreditoController {
+
+    static final String HEADER_BLOCOS_INDISPONIVEIS = "x-blocos-indisponiveis";
 
     private final ConsultarOperacoesUseCase consultarOperacoes;
 
@@ -26,9 +35,21 @@ class OperacoesCreditoController {
             @RequestParam(name = ParametrosConsulta.ID_OPERACAO, required = false) String idOperacao,
             @RequestParam(name = ParametrosConsulta.CPF_CNPJ, required = false) String cpfCnpj,
             @RequestParam(name = ParametrosConsulta.CONTA, required = false) String conta,
-            @RequestParam(name = ParametrosConsulta.LIMITE_OPERACOES, required = false) String limiteOperacoes) {
-        var parametros = new ParametrosConsulta(tipoConsulta, idOperacao, cpfCnpj, conta, limiteOperacoes);
-        var operacoes = consultarOperacoes.consultar(Consulta.comBlocosPadrao(parametros.criterio()));
-        return ResponseEntity.ok(ConsultaResponse.de(operacoes));
+            @RequestParam(name = ParametrosConsulta.LIMITE_OPERACOES, required = false) String limiteOperacoes,
+            @RequestParam(name = ParametrosConsulta.EXPAND, required = false) String expand) {
+        var parametros = new ParametrosConsulta(tipoConsulta, idOperacao, cpfCnpj, conta, limiteOperacoes, expand);
+        var operacoes = consultarOperacoes.consultar(new Consulta(parametros.criterio(), parametros.blocos()));
+        var resposta = ResponseEntity.ok();
+        blocosIndisponiveis(operacoes).ifPresent(blocos -> resposta.header(HEADER_BLOCOS_INDISPONIVEIS, blocos));
+        return resposta.body(ConsultaResponse.de(operacoes));
+    }
+
+    /** Blocos pedidos e ausentes em alguma operação, separados por vírgula na ordem canônica. */
+    private static Optional<String> blocosIndisponiveis(List<OperacaoConsultada> operacoes) {
+        var indisponiveis = EnumSet.noneOf(Bloco.class);
+        operacoes.forEach(operacao -> indisponiveis.addAll(operacao.blocosIndisponiveis()));
+        return indisponiveis.isEmpty()
+                ? Optional.empty()
+                : Optional.of(indisponiveis.stream().map(Bloco::nome).collect(Collectors.joining(",")));
     }
 }

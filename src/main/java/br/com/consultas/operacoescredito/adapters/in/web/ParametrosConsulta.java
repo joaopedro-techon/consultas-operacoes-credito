@@ -1,10 +1,12 @@
 package br.com.consultas.operacoescredito.adapters.in.web;
 
+import br.com.consultas.operacoescredito.domain.Bloco;
 import br.com.consultas.operacoescredito.domain.CriterioConsulta;
 import br.com.consultas.operacoescredito.domain.TipoConsulta;
 
 import java.util.Arrays;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -16,13 +18,14 @@ import java.util.stream.Collectors;
  * e converte o pedido em {@link CriterioConsulta}.
  */
 record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj, String conta,
-                          String limiteOperacoes) {
+                          String limiteOperacoes, String expand) {
 
     static final String HEADER_TIPO_CONSULTA = "x-tipo-consulta";
     static final String ID_OPERACAO = "id_operacao";
     static final String CPF_CNPJ = "cpf_cnpj";
     static final String CONTA = "conta";
     static final String LIMITE_OPERACOES = "limite_operacoes";
+    static final String EXPAND = "expand";
 
     /** Parâmetro que identifica o que se consulta em cada tipo de consulta. */
     private static final Map<TipoConsulta, String> IDENTIFICADOR = new EnumMap<>(Map.of(
@@ -40,6 +43,28 @@ record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj
             case OPERACAO -> new CriterioConsulta.PorOperacao(idOperacaoNumerico());
             case CLIENTE, CONTA -> throw new TipoConsultaNaoImplementadoException(tipo);
         };
+    }
+
+    /**
+     * Blocos pedidos no {@code expand} (lista separada por vírgula, nomes canônicos).
+     * Ausente ou vazio: nenhum bloco além dos que vêm sempre.
+     */
+    Set<Bloco> blocos() {
+        if (expand == null || expand.isBlank()) {
+            return Set.of();
+        }
+        var blocos = EnumSet.noneOf(Bloco.class);
+        for (var nome : expand.split(",", -1)) {
+            var nomeLimpo = nome.strip();
+            blocos.add(Bloco.porNome(nomeLimpo).orElseThrow(() -> blocoDesconhecido(nomeLimpo)));
+        }
+        return blocos;
+    }
+
+    private static RequisicaoInvalidaException blocoDesconhecido(String nome) {
+        var validos = Arrays.stream(Bloco.values()).map(Bloco::nome).collect(Collectors.joining(", "));
+        return new RequisicaoInvalidaException(
+                "Bloco '" + nome + "' inválido no parâmetro " + EXPAND + ". Blocos válidos: " + validos);
     }
 
     private TipoConsulta tipo() {

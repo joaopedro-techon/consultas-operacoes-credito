@@ -1,6 +1,8 @@
 package br.com.consultas.operacoescredito.domain;
 
+import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -27,6 +29,11 @@ public enum Bloco {
 
     public String nome() {
         return nome;
+    }
+
+    /** Bloco cujo nome canônico é {@code nome} (sensível a maiúsculas). */
+    public static Optional<Bloco> porNome(String nome) {
+        return Arrays.stream(values()).filter(bloco -> bloco.nome.equals(nome)).findFirst();
     }
 
     /** Blocos que vêm em toda consulta, com ou sem {@code expand}. */
