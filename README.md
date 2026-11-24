@@ -374,6 +374,10 @@ O script `localstack/init/ready.d/01-visao-consolidada.sh` cria a tabela `operac
 `localstack/massa/<numero_operacao>/` (um `<BLOCO>.json` por bloco, gravado em GZIP no `texto_detalhe`,
 e `indices.env` com os atributos dos GSIs, que vão só no item `OPERACAO`).
 
+Para ver a tabela no **NoSQL Workbench**: *Operation builder* → *Add connection* → *DynamoDB local*, host
+`localhost`, porta `4566`. O Workbench assina com a região `localhost`; o LocalStack do compose roda com
+`DYNAMODB_SHARE_DB=1` (um só DynamoDB para qualquer região), por isso a tabela criada em `sa-east-1` aparece.
+
 A massa é gerada por `localstack/gerar_massa.py` a partir de uma especificação curta por operação, para que
 os blocos fechem entre si (regras no cabeçalho do script: amortizações aplicadas juros antes do principal,
 saldo = principal + juros - amortizado, IOF dos componentes = soma dos controles de IOF etc.). Para incluir
