@@ -7,6 +7,7 @@ import br.com.consultas.operacoescredito.domain.CriterioConsulta;
 import br.com.consultas.operacoescredito.domain.OperacaoConsultada;
 import br.com.consultas.operacoescredito.domain.OperacaoNaoEncontradaException;
 import br.com.consultas.operacoescredito.domain.catalogo.CatalogoDeCampos;
+import br.com.consultas.operacoescredito.domain.filtro.FiltroDeOperacoes;
 import br.com.consultas.operacoescredito.domain.selecao.SelecaoDeCampos;
 
 import java.util.List;
@@ -28,11 +29,15 @@ public class ConsultarOperacoesService implements ConsultarOperacoesUseCase {
 
     @Override
     public List<OperacaoConsultada> consultar(Consulta consulta) {
+        // Validado antes da leitura: filtro inválido é 400 sem custo na fonte.
+        var filtro = consulta.filtro()
+                .map(expressao -> FiltroDeOperacoes.compilar(expressao, catalogo, consulta.blocos()))
+                .orElse(FiltroDeOperacoes.NENHUM);
         var selecao = SelecaoDeCampos.de(consulta.campos(), consulta.blocos(), catalogo);
         var operacoes = fonte.buscar(consulta.criterio(), consulta.blocos());
         if (operacoes.isEmpty() && consulta.criterio() instanceof CriterioConsulta.PorOperacao porOperacao) {
             throw new OperacaoNaoEncontradaException(porOperacao.idOperacao());
         }
-        return operacoes.stream().map(selecao::aplicar).toList();
+        return filtro.aplicar(operacoes).stream().map(selecao::aplicar).toList();
     }
 }

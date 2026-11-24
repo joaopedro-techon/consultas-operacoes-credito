@@ -10,6 +10,7 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 import br.com.consultas.operacoescredito.application.port.out.FalhaNaFonteDeOperacoesException;
 import br.com.consultas.operacoescredito.application.port.out.TipoConsultaNaoSuportadoException;
 import br.com.consultas.operacoescredito.domain.OperacaoNaoEncontradaException;
+import br.com.consultas.operacoescredito.domain.filtro.FiltroInvalidoException;
 import br.com.consultas.operacoescredito.domain.selecao.SelecaoDeCamposInvalidaException;
 
 /** Todos os erros em Problem Details (RFC 9457). */
@@ -25,6 +26,11 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(RequisicaoInvalidaException.class)
     ProblemDetail requisicaoInvalida(RequisicaoInvalidaException e) {
+        return problema(HttpStatus.BAD_REQUEST, "Requisição inválida", e.getMessage());
+    }
+
+    @ExceptionHandler(FiltroInvalidoException.class)
+    ProblemDetail filtroInvalido(FiltroInvalidoException e) {
         return problema(HttpStatus.BAD_REQUEST, "Requisição inválida", e.getMessage());
     }
 
