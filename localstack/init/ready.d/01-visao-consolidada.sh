@@ -36,8 +36,10 @@ awslocal dynamodb create-table \
 #   indices.env  -> CPF_CNPJ_CLIENTE e CONTA_CLIENTE (atributos dos GSIs esparsos, só no item OPERACAO)
 #   <BLOCO>.json -> payload do bloco
 python3 - <<'PYTHON'
-import gzip, json, os, pathlib, datetime
+import gzip, json, os, pathlib, datetime, re
 import boto3
+
+DECIMAL = "__DEC__"
 
 CODIGO_EXPAND = {"OPERACAO": 1, "ORIGINACAO": 2, "COMPONENTES": 3, "PARCELAS": 4, "AMORTIZACOES": 5,
                  "RECEBIMENTOS": 6, "PLANO": 7, "SALDO": 8, "CONTROLES_IOF": 9}
@@ -53,8 +55,10 @@ for diretorio in sorted(p for p in pathlib.Path(os.environ["MASSA_DIR"]).iterdir
     indices = dict(linha.split("=", 1) for linha in diretorio.joinpath("indices.env").read_text().split())
     for arquivo in sorted(diretorio.glob("*.json")):
         bloco = arquivo.stem
-        payload = json.loads(arquivo.read_text(encoding="utf-8"))
-        minificado = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        # Decimais passam como texto marcado para manter a escala da massa (6000.00, não 6000.0)
+        payload = json.loads(arquivo.read_text(encoding="utf-8"), parse_float=lambda s: DECIMAL + s)
+        texto = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        minificado = re.sub(f'"{DECIMAL}([^"]+)"', r"\1", texto).encode("utf-8")
         item = {
             "numero_operacao": {"N": numero_operacao},
             "custodia_expand": {"S": f"SF#EXPAND#{bloco}"},
