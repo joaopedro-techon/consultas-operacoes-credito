@@ -75,3 +75,6 @@ consultas:
       timeout-conexao: 200ms
       timeout-obter-conexao: 50ms
       timeout-resposta: 1s
+    # CLIENTE/CONTA: teto de chamadas simultâneas ao gateway (operação × bloco) por requisição
+    fan-out:
+      max-chamadas-simultaneas: ${CONSULTAS_FONTE_PRIMARIA_MAX_CHAMADAS_SIMULTANEAS:16}

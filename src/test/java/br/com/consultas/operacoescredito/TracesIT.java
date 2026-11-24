@@ -170,6 +170,28 @@ class TracesIT {
     }
 
     @Test
+    void cpfCnpjEContaNaRotaDoGatewaySaemMascaradosNosSpansDaFontePrimaria() {
+        var porCliente = novoCorrelationId();
+        var porConta = novoCorrelationId();
+
+        client.get().uri(ROTA + "/fonte-primaria?cpf_cnpj=" + CPF + "&limite_operacoes=1")
+                .header("x-tipo-consulta", "CLIENTE")
+                .header("x-correlationid", porCliente)
+                .exchange()
+                .expectStatus().isOk();
+        client.get().uri(ROTA + "/fonte-primaria?conta=" + CONTA + "&limite_operacoes=1")
+                .header("x-tipo-consulta", "CONTA")
+                .header("x-correlationid", porConta)
+                .exchange()
+                .expectStatus().isOk();
+
+        var spans = new java.util.ArrayList<SpanData>(spansDoTrace(spanHttp(porCliente).getTraceId()));
+        spans.addAll(spansDoTrace(spanHttp(porConta).getTraceId()));
+        assertThat(spans).anySatisfy(span -> assertThat(span.getName()).contains("lista_operacoes_conta"));
+        assertThat(spans.toString()).doesNotContain(CPF, CONTA);
+    }
+
+    @Test
     void traceparentRecebidoContinuaOTrace() throws Exception {
         var correlationId = novoCorrelationId();
         var traceId = UUID.randomUUID().toString().replace("-", "");

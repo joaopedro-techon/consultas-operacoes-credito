@@ -8,7 +8,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 import br.com.consultas.operacoescredito.application.port.out.FalhaNaFonteDeOperacoesException;
-import br.com.consultas.operacoescredito.application.port.out.TipoConsultaNaoSuportadoException;
+import br.com.consultas.operacoescredito.application.port.out.TempoEsgotadoNaFonteDeOperacoesException;
 import br.com.consultas.operacoescredito.domain.OperacaoNaoEncontradaException;
 import br.com.consultas.operacoescredito.domain.filtro.FiltroInvalidoException;
 import br.com.consultas.operacoescredito.domain.selecao.SelecaoDeCamposInvalidaException;
@@ -39,9 +39,12 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return problema(HttpStatus.BAD_REQUEST, "Requisição inválida", e.getMessage());
     }
 
-    @ExceptionHandler(TipoConsultaNaoSuportadoException.class)
-    ProblemDetail tipoNaoSuportadoNaFonte(TipoConsultaNaoSuportadoException e) {
-        return problema(HttpStatus.NOT_IMPLEMENTED, "Tipo de consulta não disponível", e.getMessage());
+    @ExceptionHandler(TempoEsgotadoNaFonteDeOperacoesException.class)
+    ProblemDetail tempoEsgotadoNaFonte(TempoEsgotadoNaFonteDeOperacoesException e) {
+        LOG.warn("Fonte de operações sem resposta no prazo: {}", e.getMessage(), e);
+        return problema(HttpStatus.GATEWAY_TIMEOUT, "Fonte de dados sem resposta no prazo",
+                "A fonte de dados não respondeu a tempo; reduza as operações com limite_operacoes, peça menos "
+                        + "blocos em expand ou consulte uma operação por vez (x-tipo-consulta: OPERACAO)");
     }
 
     @ExceptionHandler(FalhaNaFonteDeOperacoesException.class)
