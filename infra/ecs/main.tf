@@ -2,43 +2,25 @@ locals {
   container_name = "app"
   container_port = 8080
 
-  # Mesma imagem, dois servicos (ADR-0015). O ALB avalia a regra da fonte primaria (mais especifica) primeiro.
+  # So a visao consolidada (ADR-0017): o servico fonte-primaria, a regra dele no listener (prioridade_regras) e o
+  # target group dele ficam no repositorio consultas-operacoes-credito-mainframe. O mapa com uma entrada mantem os
+  # enderecos no state (aws_ecs_service.this["visao-consolidada"] etc.) iguais aos de antes da separacao.
   servicos = {
     "visao-consolidada" = {
       config        = var.visao_consolidada
       sigla         = "vc"
       path_patterns = ["/v1/operacoes-credito*"]
-      prioridade    = var.prioridade_regras + 1
+      # A regra da fonte primaria (mais especifica, no outro repositorio) usa prioridade_regras e vem antes
+      prioridade = var.prioridade_regras + 1
       # CPU-bound e respostas curtas: round robin com slow start para o JIT aquecer nas tasks novas
       algoritmo  = "round_robin"
       slow_start = 60
       # Deploy padrao: sobe as novas antes de tirar as antigas
       deployment_maximum_percent         = 200
       deployment_minimum_healthy_percent = 100
-      ambiente = {
-        CONSULTAS_ROTAS_ATIVAS = "visao-consolidada"
-      }
-    }
-    "fonte-primaria" = {
-      config        = var.fonte_primaria
-      sigla         = "fp"
-      path_patterns = ["/v1/operacoes-credito/fonte-primaria*"]
-      prioridade    = var.prioridade_regras
-      # Requisicoes longas (centenas de ms a segundos): menos requisicoes pendentes equilibra melhor.
-      # O ALB nao aceita slow start com least_outstanding_requests.
-      algoritmo  = "least_outstanding_requests"
-      slow_start = 0
-      # Nunca mais tasks que max_tasks, nem durante o deploy: cada task tem cota / max_tasks (ADR-0015)
-      deployment_maximum_percent         = 100
-      deployment_minimum_healthy_percent = 50
-      ambiente = {
-        CONSULTAS_ROTAS_ATIVAS                             = "fonte-primaria"
-        CONSULTAS_FONTE_PRIMARIA_COTA_CHAMADAS_POR_SEGUNDO = tostring(var.fonte_primaria.cota_chamadas_por_segundo)
-        CONSULTAS_FONTE_PRIMARIA_COTA_MAX_TASKS            = tostring(var.fonte_primaria.max_tasks)
-      }
+      ambiente                           = {}
     }
   }
-
   # Combinacoes validas de CPU (unidades) e memoria (MiB) do Fargate
   memorias_fargate = tomap({
     "256"   = [512, 1024, 2048]
@@ -146,7 +128,7 @@ resource "aws_lb_target_group" "this" {
   vpc_id                        = var.vpc_id
   load_balancing_algorithm_type = each.value.algoritmo
   slow_start                    = each.value.slow_start
-  # Menor que o stopTimeout (45 s) e maior que o maior prazo da aplicacao (6 s)
+  # Menor que o stopTimeout (45 s) e maior que o maior prazo da aplicacao (400 ms)
   deregistration_delay = 30
 
   health_check {

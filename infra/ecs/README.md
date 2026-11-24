@@ -1,25 +1,39 @@
-# Serviços ECS Fargate (referência) — IaC
+# Serviço ECS Fargate (referência) — IaC
 
-Terraform de referência dos dois serviços da API (ADR-0015): a mesma imagem roda como `visao-consolidada` e `fonte-primaria`, atrás de um ALB que já existe, cada um com seu target group e seu autoscaling. Os números padrão saem de [`docs/capacidade-ecs-fargate.md`](../../docs/capacidade-ecs-fargate.md) e são **estimativas**: recalibre com o k6 (`carga/README.md`) antes de produção.
+Terraform de referência do serviço `visao-consolidada`, atrás de um ALB que já existe, com seu target group e seu autoscaling. O serviço `fonte-primaria` (mainframe), com a regra e o target group dele, fica no repositório `consultas-operacoes-credito-mainframe` (ADR-0017). Os números padrão saem de [`docs/capacidade-ecs-fargate.md`](../../docs/capacidade-ecs-fargate.md) e são **estimativas**: recalibre com o k6 (`carga/README.md`) antes de produção.
 
 ## O que é criado
 
-| Recurso | `visao-consolidada` | `fonte-primaria` |
-| --- | --- | --- |
-| Task definition | 2 vCPU / 4 GB, `CONSULTAS_ROTAS_ATIVAS=visao-consolidada` | 1 vCPU / 2 GB, `CONSULTAS_ROTAS_ATIVAS=fonte-primaria`, `CONSULTAS_FONTE_PRIMARIA_COTA_CHAMADAS_POR_SEGUNDO` = cota, `CONSULTAS_FONTE_PRIMARIA_COTA_MAX_TASKS` = `max_tasks` |
-| Target group (`ip`, HTTP 8080) | round robin + slow start 60 s | least outstanding requests |
-| Health check | `/actuator/health/readiness`, 10 s, 2 ok / 3 falhas | igual |
-| Regra no listener (path) | `/v1/operacoes-credito*` (prioridade `prioridade_regras + 1`) | `/v1/operacoes-credito/fonte-primaria*` (prioridade `prioridade_regras`) |
-| Serviço ECS | deploy 200% / 100%, circuit breaker com rollback | deploy **100% / 50%**: nunca mais tasks que `max_tasks`, nem durante o deploy |
-| Autoscaling | 12–150 tasks; `ALBRequestCountPerTarget` alvo 33.000/min (550 req/s); CPU 60% | 2–3 tasks; `ALBRequestCountPerTarget` alvo 1.500/min (25 req/s) |
-| Log group | `/ecs/<nome>/visao-consolidada` | `/ecs/<nome>/fonte-primaria` |
+| Recurso | `visao-consolidada` |
+| --- | --- |
+| Task definition | 2 vCPU / 4 GB |
+| Target group (`ip`, HTTP 8080) | round robin + slow start 60 s |
+| Health check | `/actuator/health/readiness`, 10 s, 2 ok / 3 falhas |
+| Regra no listener (path) | `/v1/operacoes-credito*` (prioridade `prioridade_regras + 1`; `prioridade_regras` fica para a regra mais específica da fonte primária, criada pelo outro repositório) |
+| Serviço ECS | deploy 200% / 100%, circuit breaker com rollback |
+| Autoscaling | 12–150 tasks; `ALBRequestCountPerTarget` alvo 33.000/min (550 req/s); CPU 60% |
+| Log group | `/ecs/<nome>/visao-consolidada` |
 
 Pontos de projeto:
 - **`ALBRequestCountPerTarget` é a soma por minuto**: o alvo é RPS por task × 60.
-- **`max_tasks` da fonte primária é também o divisor da cota.** Cada task limita-se a `cota ÷ max_tasks` chamadas/s (output `fonte_primaria_chamadas_por_segundo_por_task`). Subir `max_tasks` sem subir a cota não aumenta a vazão; só divide a mesma cota em fatias menores.
-- A visão consolidada tem uma segunda política por CPU: se o custo por requisição for maior que o estimado, a CPU escala antes de a latência degradar. O ECS sobe se qualquer política pedir e só desce se todas permitirem.
+- Há uma segunda política por CPU: se o custo por requisição for maior que o estimado, a CPU escala antes de a latência degradar. O ECS sobe se qualquer política pedir e só desce se todas permitirem.
 - Sistema de arquivos da task somente leitura; `/tmp` (Tomcat, hsperfdata) fica num volume efêmero.
-- `stopTimeout` 45 s > desligamento gracioso (30 s) > `deregistration_delay` (30 s) > maior prazo (6 s).
+- `stopTimeout` 45 s > desligamento gracioso (30 s) > `deregistration_delay` (30 s) > maior prazo (400 ms).
+- Os recursos continuam em `for_each` sobre um mapa de uma entrada, para que os endereços no state (`aws_ecs_service.this["visao-consolidada"]` etc.) sejam os mesmos de antes da separação.
+
+## State de antes da separação
+
+Se este módulo já foi aplicado com os dois serviços, o state ainda tem os recursos `["fonte-primaria"]`, e um `apply` desta versão os **destruiria**. Antes do primeiro `plan`, tire-os deste state (ou mova-os para o state do repositório do mainframe com `terraform state mv -state-out=...`), seguindo o runbook de cutover do repositório do mainframe:
+
+```powershell
+foreach ($r in 'aws_cloudwatch_log_group.this', 'aws_ecs_task_definition.this', 'aws_lb_target_group.this',
+               'aws_lb_listener_rule.this', 'aws_ecs_service.this', 'aws_appautoscaling_target.this',
+               'aws_appautoscaling_policy.requisicoes') {
+  terraform state rm "$r[\`"fonte-primaria\`"]"
+}
+```
+
+O `plan` seguinte não pode ter nenhum `destroy`.
 
 ## Fora do escopo (pré-requisitos)
 

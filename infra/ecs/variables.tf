@@ -45,7 +45,7 @@ variable "subnet_ids" {
 }
 
 variable "security_group_ids" {
-  description = "Security groups das tasks. Devem aceitar TCP 8080 vindo do security group do ALB e permitir saida para DynamoDB, Valkey, SQS, gateway do mainframe e Collector."
+  description = "Security groups das tasks. Devem aceitar TCP 8080 vindo do security group do ALB e permitir saida para DynamoDB, Valkey, SQS e Collector."
   type        = list(string)
 }
 
@@ -60,7 +60,7 @@ variable "alb_listener_arn" {
 }
 
 variable "prioridade_regras" {
-  description = "Prioridade da regra da fonte primaria no listener; a da visao consolidada usa a seguinte. A regra mais especifica (fonte primaria) precisa vir antes."
+  description = "Prioridade base no listener: a regra da visao consolidada usa prioridade_regras + 1. A prioridade_regras fica para a regra da fonte primaria (mais especifica, criada pelo repositorio consultas-operacoes-credito-mainframe), que precisa vir antes."
   type        = number
   default     = 100
 
@@ -85,7 +85,7 @@ variable "task_role_arn" {
 # ---------------------------------------------------------------------------------------------------------
 
 variable "imagem" {
-  description = "Imagem da aplicacao (a mesma nos dois servicos), de preferencia por digest: <repo>@sha256:..."
+  description = "Imagem da aplicacao, de preferencia por digest: <repo>@sha256:..."
   type        = string
 }
 
@@ -101,14 +101,9 @@ variable "arquitetura_cpu" {
 }
 
 variable "ambiente" {
-  description = "Variaveis de ambiente comuns aos dois servicos (AWS_REGION, CONSULTAS_DYNAMODB_TABELA, CONSULTAS_VALKEY_HOST, CONSULTAS_FONTE_PRIMARIA_URL, CONSULTAS_EVENTOS_SQS_URL_FILA, OTEL_EXPORTER_OTLP_ENDPOINT...). CONSULTAS_ROTAS_ATIVAS e a cota sao preenchidas por servico."
+  description = "Variaveis de ambiente do servico (AWS_REGION, CONSULTAS_DYNAMODB_TABELA, CONSULTAS_VALKEY_HOST, CONSULTAS_EVENTOS_SQS_URL_FILA, OTEL_EXPORTER_OTLP_ENDPOINT...)."
   type        = map(string)
   default     = {}
-
-  validation {
-    condition     = length(setintersection(keys(var.ambiente), ["CONSULTAS_ROTAS_ATIVAS", "CONSULTAS_FONTE_PRIMARIA_COTA_CHAMADAS_POR_SEGUNDO", "CONSULTAS_FONTE_PRIMARIA_COTA_MAX_TASKS"])) == 0
-    error_message = "CONSULTAS_ROTAS_ATIVAS e a cota da fonte primaria sao definidas pelo modulo (var.fonte_primaria), nao em var.ambiente."
-  }
 }
 
 variable "segredos" {
@@ -153,38 +148,6 @@ variable "visao_consolidada" {
   validation {
     condition     = var.visao_consolidada.min_tasks >= 1 && var.visao_consolidada.min_tasks <= var.visao_consolidada.max_tasks
     error_message = "visao_consolidada: min_tasks deve ser >= 1 e <= max_tasks."
-  }
-}
-
-variable "fonte_primaria" {
-  description = <<-EOT
-    Servico da rota fonte primaria (gateway mainframe), I/O-bound e limitado pela cota.
-    max_tasks tambem vira CONSULTAS_FONTE_PRIMARIA_COTA_MAX_TASKS: cada task limita-se a cota_chamadas_por_segundo / max_tasks
-    (ADR-0015), entao aumentar max_tasks sem aumentar a cota NAO aumenta a vazao.
-    alvo_cpu = null por padrao (a vazao e limitada pela cota, nao pela CPU).
-  EOT
-  type = object({
-    cpu                              = optional(number, 1024)
-    memory                           = optional(number, 2048)
-    min_tasks                        = optional(number, 2)
-    max_tasks                        = optional(number, 3)
-    cota_chamadas_por_segundo        = optional(number, 1500)
-    alvo_requisicoes_por_task_minuto = optional(number, 1500)
-    alvo_cpu                         = optional(number)
-    scale_out_cooldown               = optional(number, 60)
-    scale_in_cooldown                = optional(number, 600)
-    java_tool_options                = optional(string, "")
-  })
-  default = {}
-
-  validation {
-    condition     = var.fonte_primaria.min_tasks >= 1 && var.fonte_primaria.min_tasks <= var.fonte_primaria.max_tasks
-    error_message = "fonte_primaria: min_tasks deve ser >= 1 e <= max_tasks."
-  }
-
-  validation {
-    condition     = var.fonte_primaria.cota_chamadas_por_segundo >= var.fonte_primaria.max_tasks
-    error_message = "fonte_primaria: a cota precisa dar ao menos 1 chamada/s por task (cota >= max_tasks)."
   }
 }
 
