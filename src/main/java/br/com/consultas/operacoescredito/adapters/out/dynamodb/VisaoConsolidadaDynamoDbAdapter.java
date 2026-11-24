@@ -8,6 +8,8 @@ import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos;
 import br.com.consultas.operacoescredito.adapters.out.cache.ChaveDeBloco;
 import br.com.consultas.operacoescredito.config.observabilidade.Observacoes;
 import br.com.consultas.operacoescredito.application.port.out.FonteDeOperacoes;
+import br.com.consultas.operacoescredito.application.port.out.TempoEsgotadoNaFonteDeOperacoesException;
+import br.com.consultas.operacoescredito.config.resiliencia.PrazoDaRequisicao;
 import br.com.consultas.operacoescredito.domain.Bloco;
 import br.com.consultas.operacoescredito.domain.CriterioConsulta;
 import br.com.consultas.operacoescredito.domain.OperacaoConsultada;
@@ -16,6 +18,7 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.KeysAndAttributes;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumMap;
@@ -29,6 +32,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Visão consolidada no DynamoDB (ADR-0001): um item por operação e bloco,
@@ -41,6 +46,11 @@ import java.util.concurrent.ThreadLocalRandom;
  * Os blocos lidos da tabela base passam pelo {@link CacheDeBlocos} (ADR-0002): um {@code MGET} de todas as chaves
  * operação × bloco, {@code BatchGetItem} só dos ausentes e gravação deles no cache. A {@code Query} no GSI (a lista
  * de operações do cliente/conta, com o bloco {@code operacao}) nunca é cacheada.
+ * <p>
+ * Resiliência ({@link ResilienciaDynamoDb}): a consulta passa pelos bulkheads do tipo de consulta e pelo rate
+ * limiter; cada chamada ao SDK, pelo circuit breaker, com {@code apiCallTimeout} limitado ao que resta do
+ * {@link PrazoDaRequisicao prazo da requisição}. A espera pelos lotes paralelos e a releitura das
+ * {@code UnprocessedKeys} também respeitam o prazo: estourado, 504.
  */
 @Component
 class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
@@ -55,6 +65,8 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     private static final int CHAVES_POR_LOTE = 100;
     private static final int MAX_LEITURAS_BATCH = 3;
     private static final long BACKOFF_BASE_MS = 10;
+    /** Prazo que precisa sobrar, além do backoff, para valer reler as {@code UnprocessedKeys}. */
+    private static final Duration PRAZO_MINIMO_PARA_RELEITURA = Duration.ofMillis(10);
 
     static final String ETAPA_CONSULTA_GSI = "consulta_gsi";
     static final String ETAPA_BATCH = "batch";
@@ -62,6 +74,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     private final DynamoDbClient dynamoDb;
     private final ObservationRegistry observationRegistry;
     private final CacheDeBlocos cache;
+    private final ResilienciaDynamoDb resiliencia;
     private final String tabela;
     private final String indiceCliente;
     private final String indiceConta;
@@ -70,10 +83,12 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     private final ContextSnapshotFactory contexto = ContextSnapshotFactory.builder().build();
 
     VisaoConsolidadaDynamoDbAdapter(DynamoDbClient dynamoDb, DynamoDbProperties properties,
-                                    ObservationRegistry observationRegistry, CacheDeBlocos cache) {
+                                    ObservationRegistry observationRegistry, CacheDeBlocos cache,
+                                    ResilienciaDynamoDb resiliencia) {
         this.dynamoDb = dynamoDb;
         this.observationRegistry = observationRegistry;
         this.cache = cache;
+        this.resiliencia = resiliencia;
         this.tabela = properties.tabela();
         this.indiceCliente = properties.indiceCliente();
         this.indiceConta = properties.indiceConta();
@@ -81,6 +96,10 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
 
     @Override
     public List<OperacaoConsultada> buscar(CriterioConsulta criterio, Set<Bloco> blocos) {
+        return resiliencia.consulta(criterio.tipo(), () -> buscarSemProtecao(criterio, blocos));
+    }
+
+    private List<OperacaoConsultada> buscarSemProtecao(CriterioConsulta criterio, Set<Bloco> blocos) {
         return switch (criterio) {
             case CriterioConsulta.PorOperacao porOperacao -> buscarPorOperacao(porOperacao.idOperacao(), blocos);
             case CriterioConsulta.PorCliente porCliente -> buscarPorIndice(
@@ -145,11 +164,12 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
                     .expressionAttributeValues(Map.of(":valor", AttributeValue.fromS(valor)))
                     .scanIndexForward(false)
                     .projectionExpression(PK + ", " + TEXTO_DETALHE)
-                    .exclusiveStartKey(inicio);
+                    .exclusiveStartKey(inicio)
+                    .overrideConfiguration(resiliencia.noPrazo());
             if (limite.isPresent()) {
                 requisicao.limit(limite.getAsInt() - operacoes.size());
             }
-            var resposta = dynamoDb.query(requisicao.build());
+            var resposta = resiliencia.chamada("Query", () -> dynamoDb.query(requisicao.build()));
             resposta.items().forEach(item -> operacoes.add(new OperacaoDoIndice(
                     Long.parseLong(item.get(PK).n()), item.get(TEXTO_DETALHE).b().asByteArray())));
             inicio = resposta.hasLastEvaluatedKey() && !resposta.lastEvaluatedKey().isEmpty()
@@ -249,25 +269,40 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
                 esperar(leitura);
             }
             var requisicao = pendentes;
-            var resposta = dynamoDb.batchGetItem(b -> b.requestItems(requisicao));
+            var resposta = resiliencia.chamada("BatchGetItem", () -> dynamoDb.batchGetItem(b -> b
+                    .requestItems(requisicao)
+                    .overrideConfiguration(resiliencia.noPrazo())));
             itens.addAll(resposta.responses().getOrDefault(tabela, List.of()));
             pendentes = resposta.unprocessedKeys();
         }
         return itens;
     }
 
+    /** Backoff com jitter antes de reler as chaves não processadas, só se o prazo comportar a espera e a leitura. */
     private static void esperar(int leitura) {
+        var espera = Duration.ofMillis(ThreadLocalRandom.current().nextLong(BACKOFF_BASE_MS << (leitura - 1)));
+        if (!PrazoDaRequisicao.comporta(espera.plus(PRAZO_MINIMO_PARA_RELEITURA))) {
+            throw new TempoEsgotadoNaFonteDeOperacoesException(
+                    "Chaves não processadas pelo DynamoDB e sem prazo para relê-las");
+        }
         try {
-            Thread.sleep(ThreadLocalRandom.current().nextLong(BACKOFF_BASE_MS << (leitura - 1)));
+            Thread.sleep(espera);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new VisaoConsolidadaIndisponivelException("Leitura na visão consolidada interrompida");
         }
     }
 
+    /** Espera o lote no máximo pelo que resta do prazo da requisição (sem prazo: até o fim). */
     private static <T> T aguardar(Future<T> futuro) {
         try {
-            return futuro.get();
+            var restante = PrazoDaRequisicao.restante();
+            return restante.isPresent()
+                    ? futuro.get(restante.get().toNanos(), TimeUnit.NANOSECONDS)
+                    : futuro.get();
+        } catch (TimeoutException e) {
+            throw new TempoEsgotadoNaFonteDeOperacoesException(
+                    "Lote do BatchGetItem sem resposta no prazo da requisição", e);
         } catch (ExecutionException e) {
             if (e.getCause() instanceof RuntimeException causa) {
                 throw causa;
