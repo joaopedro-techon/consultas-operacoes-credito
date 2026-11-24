@@ -48,10 +48,14 @@ class RegistroDeConsumoHttp {
             503, "fonte_indisponivel",
             504, "tempo_esgotado");
 
-    private final RegistrarConsumoUseCase registrarConsumo;
+    /**
+     * Resolvido na primeira requisição: o filtro (e este bean) é criado junto com o servidor web, antes das demais
+     * configurações; o caso de uso e o publicador seguem o ciclo normal dos beans.
+     */
+    private final ObjectProvider<RegistrarConsumoUseCase> registrarConsumo;
     private final ObjectProvider<Tracer> tracer;
 
-    RegistroDeConsumoHttp(RegistrarConsumoUseCase registrarConsumo, ObjectProvider<Tracer> tracer) {
+    RegistroDeConsumoHttp(ObjectProvider<RegistrarConsumoUseCase> registrarConsumo, ObjectProvider<Tracer> tracer) {
         this.registrarConsumo = registrarConsumo;
         this.tracer = tracer;
     }
@@ -66,7 +70,7 @@ class RegistroDeConsumoHttp {
     void registrar(HttpServletRequest request, HttpServletResponse response, Instant inicio, long duracaoMs,
                    String correlationId, CacheDaRequisicao.Contagem cache) {
         try {
-            registrarConsumo.registrar(new Consumo(
+            registrarConsumo.getObject().registrar(new Consumo(
                     inicio,
                     correlationId,
                     traceId(),
