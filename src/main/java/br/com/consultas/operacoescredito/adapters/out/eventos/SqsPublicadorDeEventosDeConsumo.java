@@ -163,8 +163,13 @@ final class SqsPublicadorDeEventosDeConsumo implements PublicadorDeEventosDeCons
             if (!pendentes.isEmpty()) {
                 log.info("Encerramento: enviando {} lotes de eventos de consumo ainda na fila", pendentes.size());
                 var drenagem = Thread.ofVirtual().name("eventos-consumo-drenagem").start(() -> {
-                    for (var lote = pendentes.poll(); lote != null && !Thread.currentThread().isInterrupted();
-                         lote = pendentes.poll()) {
+                    // Interrompida no limite, para antes de tirar o próximo lote: o que fica em pendentes é contado
+                    // no finally (tirar e só depois ver a interrupção perdia o lote sem contar)
+                    while (!Thread.currentThread().isInterrupted()) {
+                        var lote = pendentes.poll();
+                        if (lote == null) {
+                            break;
+                        }
                         enviar(lote);
                     }
                 });
