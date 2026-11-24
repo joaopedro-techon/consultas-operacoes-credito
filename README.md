@@ -161,16 +161,17 @@ qualquer chamada ao gateway).
 ### Resiliência da fonte primária
 
 Proteção própria (instâncias `fontePrimaria` do Resilience4j, isoladas da visão consolidada), aplicada a cada
-chamada ao gateway, de fora para dentro: retry → circuit breaker → rate limiter → bulkhead. Números em
-`resilience4j.*.instances.fontePrimaria` no `application.yml`; a classificação das falhas fica em
-`FalhasDoGateway`.
+chamada ao gateway, de fora para dentro: retry → circuit breaker → rate limiter → bulkhead de CLIENTE/CONTA (só
+nessas consultas) → bulkhead total. Números em `resilience4j.*.instances.fontePrimaria*` no `application.yml`; a
+classificação das falhas fica em `FalhasDoGateway` (ADR-0009).
 
 | Mecanismo | Comportamento | Resposta |
 | --- | --- | --- |
-| Prazo da requisição | `consultas.prazo.*` por tipo de consulta (OPERACAO 150 ms, CLIENTE/CONTA 400 ms), contado desde a entrada da requisição. Limita a espera por vaga no fan-out, por conexão do pool e pela resposta de cada tentativa, e o fan-out como um todo (ADR-0006) | 504 com as sugestões |
+| Prazo da requisição | `consultas.prazo.*` por tipo de consulta (OPERACAO 150 ms, CLIENTE/CONTA 400 ms), contado desde a entrada da requisição. Limita a espera por vaga no fan-out, a abertura da conexão TCP (`timeout-conexao`, 50 ms), a espera por conexão do pool e pela resposta de cada tentativa, e o fan-out como um todo (ADR-0006) | 504 com as sugestões |
 | Retry | Só o do Resilience4j (o Apache HttpClient não retenta): 2 tentativas extras, backoff exponencial de 10 ms (×2) com jitter de 50%. Só para 5xx e falha/timeout ao **abrir** a conexão; nunca 4xx, timeout de resposta, timeout do pool, circuito aberto, bulkhead ou rate limiter. Só se ainda restar `consultas.fonte-primaria.retry.prazo-minimo-restante` (50 ms) do prazo | a falha da última tentativa (502/504) |
-| Circuit breaker | Janela de 50 chamadas, mínimo 20, abre com 50% de falhas (5xx e falhas de I/O, inclusive timeouts; 4xx e 404 contam como sucesso), 5 s aberto, 5 chamadas no meio-aberto. Chamadas interrompidas pelo próprio fan-out não contam | 503 + `Retry-After` (tempo aberto) |
-| Bulkhead (semáforo) | 50 chamadas simultâneas ao gateway (= pool), espera de até 10 ms por vaga | 503 + `Retry-After: 1` |
+| Circuit breaker | Janela de 50 chamadas, mínimo 20, abre com 50% de falhas (5xx e falhas de I/O, inclusive timeouts que tiveram o tempo configurado inteiro; 4xx e 404 contam como sucesso), 5 s aberto. Não contam: chamadas interrompidas pelo próprio fan-out, timeouts encurtados pelo prazo da requisição (um 504 não abre o circuito com o mainframe saudável) e recusas do rate limiter e do bulkhead. Meio-aberto com 16 chamadas (= `max-chamadas-simultaneas`); a recusa das chamadas além delas não interrompe as sondas em andamento, que terminam e decidem o circuito (ADR-0009) | 503 + `Retry-After` (tempo aberto) |
+| Bulkhead `fontePrimaria-cliente-conta` (semáforo) | Só chamadas de consultas CLIENTE/CONTA: 40 simultâneas, espera de até 10 ms. Abaixo do total: o fan-out delas não impede OPERACAO | 503 + `Retry-After: 1` |
+| Bulkhead `fontePrimaria` (semáforo) | Todas as chamadas: 50 simultâneas ao gateway (= pool), espera de até 10 ms por vaga | 503 + `Retry-After: 1` |
 | Rate limiter | 2000 chamadas ao gateway por segundo, sem fila | 503 + `Retry-After` (período do limite) |
 
 Cada tentativa tem span e timer `consultas.dependencia` próprios. O Resilience4j publica as métricas
@@ -198,11 +199,13 @@ registro:
 | --- | --- | --- |
 | `numero` | — | inteiro com zeros à esquerda |
 | `decimal` | casas implícitas (ex.: `2`) | `BigDecimal` com essa escala |
-| `data` / `data_hora` | padrão do `DateTimeFormatter` | string `yyyy-MM-dd` / `yyyy-MM-ddTHH:mm:ss` |
+| `data` / `data_hora` | padrão do `DateTimeFormatter` | string `yyyy-MM-dd` / `yyyy-MM-ddTHH:mm:ss`; leitura estrita (data inexistente, como `2024-02-30`, é trancode inválido → 502) |
 | `booleano` | caracteres de verdadeiro e falso (default `SN`) | `true`/`false` |
 | `texto` | — | string sem os brancos das pontas |
 
-Campo todo em branco vira `null`.
+Campo todo em branco vira `null`; data ou data-hora só de zeros (`0000-00-00`, `00000000`) também, convenção do
+mainframe para "sem data" (ex.: `data_baixa_operacao` de operação ativa). Os layouts não têm sinal: o gerador de
+stubs (`localstack/gerar_trancode.py`) recusa número negativo e decimal com mais casas que o `formato`.
 
 ## Evento de consumo (SQS)
 
@@ -279,7 +282,7 @@ trocar para Datadog é trocar o exporter em `observabilidade/otel-collector.yaml
 | `consultas.dependencia` (timer, um por chamada externa) | `dependencia` (`dynamodb`, `fonte_primaria`, `valkey`, `sqs`), `operacao` (`BatchGetItem`, `Query`... no DynamoDB; o bloco, `lista_operacoes_cliente` ou `lista_operacoes_conta` na fonte primária; `MGET`/`SET` no Valkey; `SendMessageBatch` no SQS), `indice` (GSI ou `nenhum`, só DynamoDB) |
 | `consultas.cache` (contador, um incremento por bloco procurado no cache) | `bloco`, `resultado` (`hit`, `miss`; Valkey fora ou circuito aberto conta `miss`) |
 | `resilience4j.circuitbreaker.*` (estado, chamadas) | `name` (`valkey`, `dynamodb`, `fontePrimaria`, `sqs`), `state`/`kind` |
-| `resilience4j.bulkhead.*`, `resilience4j.ratelimiter.*` | `name` (`dynamodb`, `dynamodb-cliente-conta`, `fontePrimaria`; bulkhead também `sqs`) |
+| `resilience4j.bulkhead.*`, `resilience4j.ratelimiter.*` | `name` (`dynamodb`, `dynamodb-cliente-conta`, `fontePrimaria`; bulkhead também `fontePrimaria-cliente-conta` e `sqs`) |
 | `eventos.consumo.enviados` (contador; Prometheus `eventos_consumo_enviados_total`) | — |
 | `eventos.consumo.descartados` (contador; Prometheus `eventos_consumo_descartados_total`) | `motivo` (`fila_cheia`, `bulkhead_cheio`, `circuito_aberto`, `falha_envio`, `encerramento`) |
 | `eventos.consumo.fila` (gauge, eventos aguardando envio) | — |
@@ -300,7 +303,10 @@ trocar para Datadog é trocar o exporter em `observabilidade/otel-collector.yaml
 - Novos adapters (Valkey, SQS) e etapas usam `Observacoes.dependencia(...)` e `Observacoes.etapa(...)`
   (`config.observabilidade`), que fixam nomes e tags. A camada de aplicação mede etapas pela porta
   `ObservadorDeEtapas`, sem depender de Micrometer.
-- CPF/CNPJ e conta saem mascarados em todo atributo de span (`MascaramentoSpanFilter`, no exportador).
+- CPF/CNPJ e conta saem mascarados em tudo o que o span leva de texto: nome, atributos, eventos (inclusive
+  `exception.message` e `exception.stacktrace`, que trazem a URL do gateway com o documento ou a conta) e
+  descrição do status (`MascaramentoSpanExporter`, que envolve todo exportador de span). O Collector mascara de
+  novo, como defesa em profundidade (processor `transform/mascaramento`).
 - Buckets de histograma nos prazos do requisito não funcional (`management.metrics.distribution.slo`).
 - A aplicação amostra 100%; o **tail sampling** do Collector guarda todo trace com erro, com status 5xx ou
   lento (OPERACAO > 80 ms, CLIENTE/CONTA > 200 ms) e 10% do resto.
@@ -401,12 +407,12 @@ CONSULTAS_EVENTOS_SEGREDO_HMAC=segredo-local \
 | `resilience4j.circuitbreaker.instances.valkey.*` | — | janela de 20 chamadas, mínimo 10, abre com 50% de falhas, 5 s aberto, 3 chamadas em meio-aberto |
 | `consultas.fonte-primaria.url` | `CONSULTAS_FONTE_PRIMARIA_URL` | `http://localhost:8089` |
 | `consultas.fonte-primaria.layouts` | — | `classpath:trancode/layouts/` |
-| `consultas.fonte-primaria.pool.*` | — | `max-conexoes` 50, `max-conexoes-por-rota` 50, `ttl` 5m, `keep-alive` 30s, `timeout-conexao` 200ms, `timeout-obter-conexao` 50ms, `timeout-resposta` 1s |
+| `consultas.fonte-primaria.pool.*` | — | `max-conexoes` 50, `max-conexoes-por-rota` 50, `ttl` 5m, `keep-alive` 30s, `timeout-conexao` 50ms, `timeout-obter-conexao` 50ms, `timeout-resposta` 1s (todos limitados ao prazo restante) |
 | `consultas.fonte-primaria.fan-out.max-chamadas-simultaneas` | `CONSULTAS_FONTE_PRIMARIA_MAX_CHAMADAS_SIMULTANEAS` | `16` (teto de chamadas ao gateway em andamento por requisição; mínimo 1) |
 | `consultas.fonte-primaria.retry.prazo-minimo-restante` | — | `50ms` (só retenta se restar isto do prazo da requisição) |
 | `consultas.prazo.operacao` / `.cliente` / `.conta` | `CONSULTAS_PRAZO_OPERACAO` / `_CLIENTE` / `_CONTA` | `150ms` / `400ms` / `400ms` (prazo da requisição → 504) |
-| `resilience4j.circuitbreaker.instances.fontePrimaria.*` | — | janela `COUNT_BASED` de 50, mínimo 20 chamadas, 50% de falhas, 5s aberto, 5 chamadas no meio-aberto |
-| `resilience4j.bulkhead.instances.fontePrimaria.*` | — | `max-concurrent-calls` 50, `max-wait-duration` 10ms |
+| `resilience4j.circuitbreaker.instances.fontePrimaria.*` | — | janela `COUNT_BASED` de 50, mínimo 20 chamadas, 50% de falhas, 5s aberto, 16 chamadas no meio-aberto |
+| `resilience4j.bulkhead.instances.fontePrimaria.*` / `.fontePrimaria-cliente-conta.*` | — | `max-concurrent-calls` 50 / 40, `max-wait-duration` 10ms |
 | `resilience4j.ratelimiter.instances.fontePrimaria.*` | — | `limit-for-period` 2000 por `1s`, `timeout-duration` 0s |
 | `resilience4j.retry.instances.fontePrimaria.*` | — | `max-attempts` 3, `wait-duration` 10ms, backoff exponencial ×2, jitter 0.5 |
 | `consultas.eventos.habilitado` | `CONSULTAS_EVENTOS_HABILITADO` | `true` |
@@ -438,7 +444,11 @@ Requer JDK 25 e Docker. `verify` roda:
   cada operação, cliente e conta da massa; `FontePrimariaFanOutIT` registra massas próprias no WireMock para
   teto de concorrência, falhas parciais e correlationId nas chamadas filhas; `ResilienciaFontePrimariaIT` e
   `RateLimiterFontePrimariaIT` usam atrasos, falhas e cenários do WireMock para retry, prazo (504), circuit
-  breaker abrindo e voltando, bulkhead e rate limiter (503); `IsolamentoFontePrimariaIT` mostra a visão
+  breaker abrindo e voltando (inclusive com fan-out maior que as chamadas do meio-aberto), timeouts encurtados
+  pelo prazo fora do circuito, bulkheads total e de CLIENTE/CONTA e rate limiter (503); `FontePrimariaConfigTest`
+  mostra, contra um endereço não roteável, o timeout de conexão de 50 ms (conta no circuito) e o encurtado pelo prazo
+  (não conta); `TracesIT` derruba e atrasa o gateway nas listas de cliente e conta e confere que nem os spans
+  (eventos de exceção e status incluídos) nem os logs levam CPF/CNPJ ou conta; `IsolamentoFontePrimariaIT` mostra a visão
   consolidada saudável com o mainframe degradado); `ResilienciaVisaoConsolidadaIT` põe o LocalStack atrás de um
   Toxiproxy (`VisaoConsolidadaComToxiproxyContainers`, contexto próprio) e atrasa ou derruba o proxy para o 504 no
   prazo de cada tipo de consulta, o circuit breaker abrindo (503 + `Retry-After`), o rate limiter (503) e o
@@ -457,4 +467,8 @@ Requer JDK 25 e Docker. `verify` roda:
   chamadas (`src/test/resources/application.properties`), para que containers frios e falhas provocadas de
   propósito não afetem outros testes; os testes de resiliência usam contexto próprio com valores pequenos.
 
-O CI (`.github/workflows/ci.yml`) executa `./mvnw -B verify` e constrói a imagem Docker.
+O CI (`.github/workflows/ci.yml`, actions fixadas por SHA do commit) executa `./mvnw -B verify`, valida o
+docker-compose e o Collector, constrói a imagem Docker e, num job à parte, roda `terraform fmt -check` e
+`terraform init -backend=false` + `terraform validate` em `infra/api-gateway`. A imagem parte de bases Temurin
+fixadas por tag exata e digest, roda como o usuário numérico `10001` e termina o processo em `OutOfMemoryError`
+(`-XX:+ExitOnOutOfMemoryError`).

@@ -1,5 +1,7 @@
 package br.com.consultas.operacoescredito;
 
+import io.github.resilience4j.bulkhead.BulkheadRegistry;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,12 +40,16 @@ import static org.assertj.core.api.Assertions.assertThat;
         "resilience4j.circuitbreaker.instances.fontePrimaria.wait-duration-in-open-state=1s",
         "resilience4j.circuitbreaker.instances.fontePrimaria.permitted-number-of-calls-in-half-open-state=2",
         "resilience4j.bulkhead.instances.fontePrimaria.max-concurrent-calls=" + ResilienciaFontePrimariaIT.BULKHEAD,
-        "resilience4j.bulkhead.instances.fontePrimaria.max-wait-duration=0ms"})
+        "resilience4j.bulkhead.instances.fontePrimaria.max-wait-duration=0ms",
+        "resilience4j.bulkhead.instances.fontePrimaria-cliente-conta.max-concurrent-calls="
+                + ResilienciaFontePrimariaIT.TETO_CLIENTE_CONTA,
+        "resilience4j.bulkhead.instances.fontePrimaria-cliente-conta.max-wait-duration=0ms"})
 @AutoConfigureRestTestClient
 @Import(FontePrimariaContainers.class)
 class ResilienciaFontePrimariaIT {
 
     static final int BULKHEAD = 6;
+    static final int TETO_CLIENTE_CONTA = 4;
 
     private static final String ROTA = "/v1/operacoes-credito/fonte-primaria";
     private static final JsonMapper JSON = JsonMapper.builder().build();
@@ -51,16 +57,18 @@ class ResilienciaFontePrimariaIT {
     private final RestTestClient client;
     private final GatewayMainframeSimulado gateway;
     private final CircuitBreakerRegistry circuitos;
+    private final BulkheadRegistry bulkheads;
 
     @Autowired
     ResilienciaFontePrimariaIT(@LocalServerPort int porta, @Qualifier("wireMock") GenericContainer<?> wireMock,
-                               CircuitBreakerRegistry circuitos) {
+                               CircuitBreakerRegistry circuitos, BulkheadRegistry bulkheads) {
         // Cliente sem retry automático: o do Apache HttpClient repetiria o 503 depois do Retry-After
         this.client = RestTestClient.bindToServer(new JdkClientHttpRequestFactory())
                 .baseUrl("http://localhost:" + porta)
                 .build();
         this.gateway = new GatewayMainframeSimulado(wireMock);
         this.circuitos = circuitos;
+        this.bulkheads = bulkheads;
     }
 
     @BeforeEach
@@ -203,6 +211,81 @@ class ResilienciaFontePrimariaIT {
         consultarOperacao(id, null).expectStatus().isOk();
         consultarOperacao(id, null).expectStatus().isOk();
         assertThat(metrica("resilience4j.circuitbreaker.state", "name:fontePrimaria", "state:closed")).isEqualTo(1.0);
+    }
+
+    @Test
+    void circuitoMeioAbertoFechaMesmoComFanOutMaiorQueAsChamadasPermitidas() throws InterruptedException {
+        var id = 920000081L;
+        var blocos = "/mainframe/operacoes/" + id + "/blocos/.*";
+        var falhas = gateway.registrarPadrao(blocos, 500, "erro", 0);
+        abrirCircuito(id);
+
+        gateway.remover(falhas);
+        // Mainframe de volta, mas lento: as sondas do meio-aberto ainda estão em andamento quando as demais
+        // chamadas do fan-out são recusadas (404: bloco inexistente, sucesso para o circuito)
+        gateway.registrarPadrao(blocos, 404, "", 300);
+        Thread.sleep(1200); // wait-duration-in-open-state = 1 s
+
+        // 9 blocos em paralelo; o meio-aberto permite 2: as outras 7 chamadas são recusadas (503)
+        consultarOperacao(id, "componentes,parcelas,amortizacoes,recebimentos,plano,saldo,controles_iof")
+                .expectStatus().isEqualTo(503);
+
+        assertThat(circuitos.circuitBreaker("fontePrimaria").getState())
+                .as("as 2 sondas terminaram e fecharam o circuito, em vez de serem interrompidas e ignoradas")
+                .isEqualTo(CircuitBreaker.State.CLOSED);
+    }
+
+    @Test
+    void timeoutsEncurtadosPeloPrazoNumaConsultaClienteNaoContamNoCircuito() {
+        var cpf = "11144477735";
+        gateway.registrar("/mainframe/clientes/" + cpf + "/operacoes", 200, "001%018d2026-01-01".formatted(920000200L),
+                0);
+        // 3 blocos em andamento (dentro do teto de CLIENTE/CONTA deste contexto), todos presos além do prazo de
+        // 1,5 s: o timeout de resposta de cada um é encurtado para o que resta do prazo
+        gateway.registrarPadrao("/mainframe/operacoes/920000200/blocos/.*", 200, "000", 4000);
+
+        client.get().uri(ROTA + "?cpf_cnpj=" + cpf + "&expand=parcelas")
+                .header("x-tipo-consulta", "CLIENTE")
+                .exchange()
+                .expectStatus().isEqualTo(504);
+
+        var metricas = circuitos.circuitBreaker("fontePrimaria").getMetrics();
+        assertThat(metricas.getNumberOfFailedCalls()).as("504 da aplicação não é falha do mainframe").isZero();
+        assertThat(circuitos.circuitBreaker("fontePrimaria").getState()).isEqualTo(CircuitBreaker.State.CLOSED);
+    }
+
+    @Test
+    void clienteEContaSaturadosNaFontePrimariaNaoImpedemOperacao() {
+        var bulkhead = bulkheads.bulkhead("fontePrimaria-cliente-conta");
+        var id = 920000110L;
+        gateway.registrarOperacao(id, 0);
+        var ocupadas = 0;
+        try {
+            // Chamadas de consultas CLIENTE/CONTA em andamento ocupando todo o teto delas
+            while (bulkhead.tryAcquirePermission()) {
+                ocupadas++;
+            }
+            assertThat(ocupadas).isEqualTo(TETO_CLIENTE_CONTA);
+
+            client.get().uri(ROTA + "?cpf_cnpj=52998224725")
+                    .header("x-tipo-consulta", "CLIENTE")
+                    .exchange()
+                    .expectStatus().isEqualTo(503)
+                    .expectHeader().valueEquals("Retry-After", "1");
+            client.get().uri(ROTA + "?conta=434115000065874")
+                    .header("x-tipo-consulta", "CONTA")
+                    .exchange()
+                    .expectStatus().isEqualTo(503);
+            consultarOperacao(id, null).expectStatus().isOk();
+        } finally {
+            for (int i = 0; i < ocupadas; i++) {
+                bulkhead.onComplete();
+            }
+        }
+        client.get().uri(ROTA + "?cpf_cnpj=52998224725&limite_operacoes=1")
+                .header("x-tipo-consulta", "CLIENTE")
+                .exchange()
+                .expectStatus().isOk();
     }
 
     @Test

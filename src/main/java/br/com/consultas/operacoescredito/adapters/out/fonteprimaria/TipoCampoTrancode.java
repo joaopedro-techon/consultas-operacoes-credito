@@ -5,6 +5,8 @@ import java.math.BigInteger;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.format.ResolverStyle;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -12,7 +14,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Tipo de um campo do trancode e a conversão do texto (já sem brancos) no valor que a visão
  * consolidada produz para o mesmo campo: números inteiros como {@code Integer}/{@code Long},
- * decimais como {@code BigDecimal} com a escala das casas implícitas, datas como string ISO.
+ * decimais como {@code BigDecimal} com a escala das casas implícitas, datas como string ISO. Data inexistente é
+ * erro; data só de zeros é {@code null} ("sem data" no mainframe).
  */
 enum TipoCampoTrancode {
 
@@ -39,6 +42,9 @@ enum TipoCampoTrancode {
     DATA {
         @Override
         Object converter(String valor, String formato) {
+            if (zerada(valor)) {
+                return null;
+            }
             return LocalDate.parse(valor, formatador(formato)).format(DateTimeFormatter.ISO_LOCAL_DATE);
         }
 
@@ -50,6 +56,9 @@ enum TipoCampoTrancode {
     DATA_HORA {
         @Override
         Object converter(String valor, String formato) {
+            if (zerada(valor)) {
+                return null;
+            }
             return LocalDateTime.parse(valor, formatador(formato)).format(ISO_DATA_HORA);
         }
 
@@ -108,10 +117,38 @@ enum TipoCampoTrancode {
         return Integer.parseInt(formato.strip());
     }
 
+    /**
+     * Data só de zeros ({@code 0000-00-00}, {@code 00000000}): convenção do mainframe para "sem data", lida como
+     * {@code null}, igual ao campo em branco.
+     */
+    private static boolean zerada(String valor) {
+        var digitos = valor.chars().filter(Character::isDigit).toArray();
+        return digitos.length > 0 && Arrays.stream(digitos).allMatch(digito -> digito == '0');
+    }
+
+    /**
+     * Formatador estrito: data inexistente ({@code 2024-02-30}, mês 13) é erro de trancode, nunca ajustada para a
+     * data válida mais próxima. Com {@link ResolverStyle#STRICT}, {@code yyyy} (ano da era) exigiria a era no texto,
+     * então o ano do layout é lido como {@code uuuu} (ano proléptico).
+     */
     private static DateTimeFormatter formatador(String formato) {
         if (formato == null) {
             throw new IllegalArgumentException("data exige formato (ex.: yyyy-MM-dd)");
         }
-        return FORMATADORES.computeIfAbsent(formato, DateTimeFormatter::ofPattern);
+        return FORMATADORES.computeIfAbsent(formato, padrao -> DateTimeFormatter.ofPattern(anoProleptico(padrao),
+                Locale.ROOT).withResolverStyle(ResolverStyle.STRICT));
+    }
+
+    /** Troca {@code y} por {@code u} fora dos trechos literais entre aspas simples. */
+    private static String anoProleptico(String padrao) {
+        var resultado = new StringBuilder(padrao.length());
+        var literal = false;
+        for (var caractere : padrao.toCharArray()) {
+            if (caractere == '\'') {
+                literal = !literal;
+            }
+            resultado.append(!literal && caractere == 'y' ? 'u' : caractere);
+        }
+        return resultado.toString();
     }
 }

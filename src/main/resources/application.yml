@@ -108,7 +108,9 @@ consultas:
       max-conexoes-por-rota: 50
       ttl: 5m
       keep-alive: 30s
-      timeout-conexao: 200ms
+      # Bem abaixo do prazo da OPERACAO (150 ms): host inalcançável estoura este timeout (conta no circuito e é
+      # retentado), não o prazo. Conexão, pool e resposta são limitados ao que resta do prazo (ADR-0006/0009)
+      timeout-conexao: 50ms
       timeout-obter-conexao: 50ms
       timeout-resposta: 1s
     # CLIENTE/CONTA: teto de chamadas simultâneas ao gateway (operação × bloco) por requisição
@@ -167,13 +169,17 @@ resilience4j:
         failure-rate-threshold: 50
         wait-duration-in-open-state: 5s
         permitted-number-of-calls-in-half-open-state: 3
+      # Conta cada tentativa ao gateway; não contam timeouts encurtados pelo prazo da requisição, chamadas
+      # interrompidas pelo fan-out nem recusas do rate limiter/bulkhead (ADR-0009)
       fontePrimaria:
         sliding-window-type: COUNT_BASED
         sliding-window-size: 50
         minimum-number-of-calls: 20
         failure-rate-threshold: 50
         wait-duration-in-open-state: 5s
-        permitted-number-of-calls-in-half-open-state: 5
+        # = consultas.fonte-primaria.fan-out.max-chamadas-simultaneas: as chamadas em andamento de um fan-out
+        # cabem como sondas do meio-aberto (e a recusa das seguintes não as interrompe, ADR-0009)
+        permitted-number-of-calls-in-half-open-state: 16
         automatic-transition-from-open-to-half-open-enabled: false
       # Evento de consumo: aberto, o lote é descartado sem chamar o SQS (a consulta nunca é afetada)
       sqs:
@@ -196,6 +202,11 @@ resilience4j:
       fontePrimaria:
         # Igual ao pool de conexões: acima disso a chamada só esperaria conexão
         max-concurrent-calls: 50
+        max-wait-duration: 10ms
+      # Chamadas simultâneas das consultas CLIENTE/CONTA na fonte primária, abaixo do total (fontePrimaria): o
+      # fan-out delas (até 16 por consulta) nunca toma todas as vagas e sempre sobram 10 para OPERACAO
+      fontePrimaria-cliente-conta:
+        max-concurrent-calls: 40
         max-wait-duration: 10ms
       # Envios (SendMessageBatch) simultâneos; sem vaga em 1 s o lote é descartado. Enquanto o drenador espera,
       # a fila em memória segura os eventos novos

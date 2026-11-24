@@ -1,24 +1,31 @@
 package br.com.consultas.operacoescredito;
 
 import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.sdk.testing.exporter.InMemorySpanExporter;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.micrometer.tracing.test.autoconfigure.AutoConfigureTracing;
 import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureRestTestClient;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.web.servlet.client.RestTestClient;
+import org.testcontainers.containers.GenericContainer;
 
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -35,6 +42,7 @@ import static org.awaitility.Awaitility.await;
 @AutoConfigureRestTestClient
 @AutoConfigureTracing
 @Import({VisaoConsolidadaContainers.class, FontePrimariaContainers.class, TracesIT.ExportadorEmMemoria.class})
+@ExtendWith(OutputCaptureExtension.class)
 class TracesIT {
 
     private static final String ROTA = "/v1/operacoes-credito";
@@ -43,14 +51,17 @@ class TracesIT {
 
     private final RestTestClient client;
     private final InMemorySpanExporter exportador;
+    private final GatewayMainframeSimulado gateway;
 
     @LocalServerPort
     private int porta;
 
     @Autowired
-    TracesIT(RestTestClient client, InMemorySpanExporter exportador) {
+    TracesIT(RestTestClient client, InMemorySpanExporter exportador,
+             @Qualifier("wireMock") GenericContainer<?> wireMock) {
         this.client = client;
         this.exportador = exportador;
+        this.gateway = new GatewayMainframeSimulado(wireMock);
     }
 
     @Test
@@ -191,6 +202,53 @@ class TracesIT {
         assertThat(spans.toString()).doesNotContain(CPF, CONTA);
     }
 
+    /**
+     * Gateway fora (5xx) ou lento (timeout de resposta) nas listas de cliente e de conta: a exceção do
+     * {@code RestClient} traz a URL do gateway com o CPF/CNPJ ou a conta na mensagem e no stack trace, que vão
+     * para os eventos de exceção e o status dos spans (do adapter, do cliente HTTP e do servidor) e para o log de
+     * erro. Nada disso pode sair em claro.
+     */
+    @Test
+    void falhaETimeoutDoGatewayNaoDeixamCpfCnpjNemContaNosSpansNemNosLogs(CapturedOutput saida) {
+        var cpfForaDoAr = "11144477735";
+        var cpfLento = "39053344705";
+        var contaForaDoAr = "998877665544332";
+        var contaLenta = "112233445566778";
+        var stubs = List.of(
+                gateway.registrar("/mainframe/clientes/" + cpfForaDoAr + "/operacoes", 503, "fora do ar", 0),
+                gateway.registrar("/mainframe/clientes/" + cpfLento + "/operacoes", 200, "000", 2000),
+                gateway.registrar("/mainframe/contas/" + contaForaDoAr + "/operacoes", 500, "erro", 0),
+                gateway.registrar("/mainframe/contas/" + contaLenta + "/operacoes", 200, "000", 2000));
+        var correlationIds = new ArrayList<String>();
+        try {
+            correlationIds.add(consultarFontePrimaria("CLIENTE", "cpf_cnpj=" + cpfForaDoAr, 502));
+            correlationIds.add(consultarFontePrimaria("CLIENTE", "cpf_cnpj=" + cpfLento, 504));
+            correlationIds.add(consultarFontePrimaria("CONTA", "conta=" + contaForaDoAr, 502));
+            correlationIds.add(consultarFontePrimaria("CONTA", "conta=" + contaLenta, 504));
+        } finally {
+            stubs.forEach(gateway::remover);
+        }
+
+        var spans = new ArrayList<SpanData>();
+        for (var correlationId : correlationIds) {
+            spans.addAll(spansDoTrace(spanHttp(correlationId).getTraceId()));
+        }
+        assertThat(spans).as("o erro do gateway foi registrado nos spans")
+                .anySatisfy(span -> assertThat(span.getEvents()).isNotEmpty())
+                .anySatisfy(span -> assertThat(span.getStatus().getStatusCode()).isEqualTo(StatusCode.ERROR));
+        var exportados = spans.toString();
+        assertThat(exportados).as("eventos de exceção mascarados, não omitidos").contains("/clientes/111******35");
+        assertThat(exportados).doesNotContain(cpfForaDoAr, cpfLento, contaForaDoAr, contaLenta);
+        assertThat(exportador.getFinishedSpanItems().toString())
+                .doesNotContain(cpfForaDoAr, cpfLento, contaForaDoAr, contaLenta);
+
+        // O log de acesso sai depois do log de erro da mesma requisição (mesmo appender assíncrono)
+        await().atMost(Duration.ofSeconds(5)).until(() -> correlationIds.stream()
+                .allMatch(correlationId -> saida.getOut().contains(correlationId)));
+        assertThat(saida.getOut()).contains("Falha na fonte de operações");
+        assertThat(saida.getAll()).doesNotContain(cpfForaDoAr, cpfLento, contaForaDoAr, contaLenta);
+    }
+
     @Test
     void traceparentRecebidoContinuaOTrace() throws Exception {
         var correlationId = novoCorrelationId();
@@ -226,6 +284,16 @@ class TracesIT {
         assertThat(atributo(spanHttp(porCliente), "cpf_cnpj")).isEqualTo("529******25");
         assertThat(atributo(spanHttp(porConta), "conta")).isEqualTo("***********5874");
         assertThat(exportador.getFinishedSpanItems().toString()).doesNotContain(CPF, CONTA);
+    }
+
+    private String consultarFontePrimaria(String tipo, String criterio, int status) {
+        var correlationId = novoCorrelationId();
+        client.get().uri(ROTA + "/fonte-primaria?" + criterio)
+                .header("x-tipo-consulta", tipo)
+                .header("x-correlationid", correlationId)
+                .exchange()
+                .expectStatus().isEqualTo(status);
+        return correlationId;
     }
 
     private SpanData spanHttp(String correlationId) {
