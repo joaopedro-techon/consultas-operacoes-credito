@@ -40,6 +40,7 @@ class OperacoesCreditoController {
     /**
      * Consulta na visão consolidada ({@code /v1/operacoes-credito}) ou na fonte primária
      * ({@code /v1/operacoes-credito/fonte-primaria}): mesmo contrato, mesmo caso de uso, outra fonte.
+     * Parâmetro do contrato repetido é 400 (o Spring juntaria os valores com vírgula).
      */
     @GetMapping({"", "/{rota:" + FONTE_PRIMARIA + "}"})
     ResponseEntity<ConsultaResponse> consultar(
@@ -53,6 +54,7 @@ class OperacoesCreditoController {
             @RequestParam(name = ParametrosConsulta.FIELDS, required = false) String fields,
             @RequestParam(name = ParametrosConsulta.FILTER, required = false) String filter,
             HttpServletRequest requisicao) {
+        ParametrosConsulta.rejeitarRepetidos(requisicao.getParameterMap());
         var parametros = new ParametrosConsulta(tipoConsulta, idOperacao, cpfCnpj, conta, limiteOperacoes, expand, fields);
         var consultarOperacoes = rota == null ? visaoConsolidada : fontePrimaria;
         var operacoes = consultarOperacoes.consultar(new Consulta(
