@@ -28,9 +28,12 @@ import java.util.stream.Collectors;
  * Resolve o contexto da requisição antes de qualquer processamento: {@code x-correlationid}
  * (validado ou gerado), {@code x-consumidor}, tipo de consulta e rota vão para o MDC, o
  * correlationId volta no header da resposta e, ao final, sai um log de acesso e o MDC é limpo.
+ * Roda logo depois do {@code ServerHttpObservationFilter} (ordem {@code HIGHEST_PRECEDENCE + 1}),
+ * para que até a rejeição de um {@code x-correlationid} inválido seja medida e tenha span, e o log
+ * de acesso saia com o {@code trace_id}.
  */
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE)
+@Order(Ordered.HIGHEST_PRECEDENCE + 2)
 class ContextoRequisicaoFilter extends OncePerRequestFilter {
 
     static final String HEADER_CORRELATION_ID = "x-correlationid";
@@ -107,7 +110,7 @@ class ContextoRequisicaoFilter extends OncePerRequestFilter {
     }
 
     /** Blocos pedidos: {@code operacao} e {@code originacao} sempre, mais os do {@code expand}. */
-    private static List<String> blocos(HttpServletRequest request) {
+    static List<String> blocos(HttpServletRequest request) {
         var blocos = new LinkedHashSet<>(BLOCOS_SEMPRE);
         var expand = request.getParameter("expand");
         if (expand != null) {
@@ -119,12 +122,12 @@ class ContextoRequisicaoFilter extends OncePerRequestFilter {
         return List.copyOf(blocos);
     }
 
-    private static String consumidor(HttpServletRequest request) {
+    static String consumidor(HttpServletRequest request) {
         var consumidor = request.getHeader(HEADER_CONSUMIDOR);
         return consumidor == null || consumidor.isBlank() ? CONSUMIDOR_DESCONHECIDO : consumidor.strip();
     }
 
-    private static String tipoConsulta(HttpServletRequest request) {
+    static String tipoConsulta(HttpServletRequest request) {
         var tipo = request.getHeader(ParametrosConsulta.HEADER_TIPO_CONSULTA);
         if (tipo == null || tipo.isBlank()) {
             return null;
@@ -132,7 +135,7 @@ class ContextoRequisicaoFilter extends OncePerRequestFilter {
         return TIPOS_VALIDOS.contains(tipo) ? tipo : TIPO_INVALIDO;
     }
 
-    private static String rota(HttpServletRequest request) {
+    static String rota(HttpServletRequest request) {
         return request.getRequestURI().endsWith("/fonte-primaria") ? "fonte_primaria" : "visao_consolidada";
     }
 

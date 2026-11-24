@@ -6,8 +6,10 @@ import br.com.consultas.operacoescredito.application.port.out.TipoConsultaNaoSup
 import br.com.consultas.operacoescredito.domain.Bloco;
 import br.com.consultas.operacoescredito.domain.CriterioConsulta;
 import br.com.consultas.operacoescredito.domain.OperacaoConsultada;
+import br.com.consultas.operacoescredito.config.observabilidade.Observacoes;
 import io.micrometer.context.ContextExecutorService;
 import io.micrometer.context.ContextSnapshotFactory;
+import io.micrometer.observation.ObservationRegistry;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
 
@@ -30,15 +32,21 @@ import java.util.concurrent.Future;
 final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
 
     private static final String FONTE = "fonte primária";
+    /** Valor da tag {@code dependencia} nos spans e timers das chamadas ao gateway. */
+    static final String DEPENDENCIA = "fonte_primaria";
+    static final String ETAPA_FAN_OUT = "fan_out";
 
     private final GatewayMainframeClient gateway;
     private final LayoutsTrancode layouts;
+    private final ObservationRegistry observationRegistry;
     private final ParserTrancode parser = new ParserTrancode();
     private final ContextSnapshotFactory contexto = ContextSnapshotFactory.builder().build();
 
-    FontePrimariaTrancodeAdapter(GatewayMainframeClient gateway, LayoutsTrancode layouts) {
+    FontePrimariaTrancodeAdapter(GatewayMainframeClient gateway, LayoutsTrancode layouts,
+                                 ObservationRegistry observationRegistry) {
         this.gateway = gateway;
         this.layouts = layouts;
+        this.observationRegistry = observationRegistry;
     }
 
     @Override
@@ -51,7 +59,8 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
     }
 
     private List<OperacaoConsultada> buscarPorOperacao(long idOperacao, Set<Bloco> blocos) {
-        var conteudos = lerBlocosEmParalelo(idOperacao, blocos);
+        var conteudos = Observacoes.etapa(observationRegistry, ETAPA_FAN_OUT)
+                .observe(() -> lerBlocosEmParalelo(idOperacao, blocos));
         if (conteudos.get(Bloco.OPERACAO).isEmpty()) {
             return List.of();
         }
@@ -76,14 +85,19 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
         return trancode(idOperacao, bloco).map(trancode -> parser.ler(trancode, layouts.de(bloco)));
     }
 
+    /** Uma chamada ao gateway, com span e timer de dependência; 404 (bloco inexistente) não é erro. */
     private Optional<String> trancode(long idOperacao, Bloco bloco) {
-        try {
+        var observacao = Observacoes.dependencia(observationRegistry, DEPENDENCIA, bloco.nome()).start();
+        try (var _ = observacao.openScope()) {
             return Optional.of(Objects.requireNonNullElse(gateway.bloco(idOperacao, bloco.nome()), ""));
         } catch (HttpClientErrorException.NotFound e) {
             return Optional.empty();
         } catch (RestClientException e) {
+            observacao.error(e);
             throw new FalhaNaFonteDeOperacoesException(
                     "Falha ao consultar o bloco " + bloco.nome() + " na " + FONTE, e);
+        } finally {
+            observacao.stop();
         }
     }
 

@@ -53,6 +53,11 @@
             <groupId>io.micrometer</groupId>
             <artifactId>context-propagation</artifactId>
         </dependency>
+        <!-- Métricas e traces via OTLP (inclui a ponte Micrometer Tracing -> OpenTelemetry e o traceparent W3C) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-opentelemetry</artifactId>
+        </dependency>
         <!-- Fork mantido do cz.jirutka.rsql:rsql-parser (sem release desde 2016); mesma API e pacote. -->
         <dependency>
             <groupId>io.github.nstdio</groupId>
@@ -68,15 +73,6 @@
             <groupId>org.apache.httpcomponents.client5</groupId>
             <artifactId>httpclient5</artifactId>
         </dependency>
-        <!-- Trace W3C: traceparent recebido continua no RestClient da fonte primária (exportação: ticket #10) -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-micrometer-tracing-opentelemetry</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.micrometer</groupId>
-            <artifactId>micrometer-tracing-bridge-otel</artifactId>
-        </dependency>
         <!-- Layouts de trancode em YAML -->
         <dependency>
             <groupId>tools.jackson.dataformat</groupId>
@@ -86,6 +82,16 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-opentelemetry-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-testing</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

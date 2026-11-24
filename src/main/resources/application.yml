@@ -27,11 +27,33 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics
   endpoint:
     health:
       probes:
         enabled: true
+  # Métricas e traces saem por OTLP (HTTP) para o OpenTelemetry Collector. O endpoint dos traces vem de
+  # OTEL_EXPORTER_OTLP_ENDPOINT (mapeado pelo Spring Boot); sem a variável, só as métricas tentam localhost.
+  opentelemetry:
+    resource-attributes:
+      deployment.environment.name: ${CONSULTAS_AMBIENTE:local}
+  otlp:
+    metrics:
+      export:
+        url: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/metrics
+        base-time-unit: seconds
+        step: 15s
+  tracing:
+    sampling:
+      # 100% na aplicação: quem decide o que guardar é o tail sampling do OpenTelemetry Collector
+      probability: 1.0
+  metrics:
+    distribution:
+      # Buckets nos prazos do requisito não funcional (P99 80/200 ms, 504 em 150/400 ms)
+      slo:
+        http.server.requests: 25ms,50ms,80ms,100ms,150ms,200ms,300ms,400ms,600ms,1s,2s
+        consultas.dependencia: 5ms,10ms,25ms,50ms,80ms,100ms,200ms,400ms,1s
+        consultas.etapa: 5ms,10ms,25ms,50ms,80ms,100ms,200ms,400ms,1s
 
 consultas:
   dynamodb:

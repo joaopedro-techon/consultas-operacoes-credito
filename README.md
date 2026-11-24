@@ -151,6 +151,38 @@ Um filtro (`ContextoRequisicaoFilter`) roda antes de qualquer processamento em t
 - O MDC chega às threads filhas por Micrometer Context Propagation (`MdcThreadLocalAccessor`): envolver a
   tarefa com `ContextSnapshotFactory.captureAll().wrap(...)` ou o executor com `ContextExecutorService.wrap(...)`.
 
+## Métricas e traces
+
+Micrometer + OpenTelemetry (`spring-boot-starter-opentelemetry`): a aplicação exporta métricas
+(`OtlpMeterRegistry`) e traces (bridge Micrometer Tracing → OpenTelemetry SDK) por OTLP/HTTP para o
+OpenTelemetry Collector, que manda métricas ao Prometheus e traces ao Jaeger. Nada de fornecedor no código:
+trocar para Datadog é trocar o exporter em `observabilidade/otel-collector.yaml`.
+
+| Métrica | Tags |
+| --- | --- |
+| `http.server.requests` (timer) | `consumidor`, `tipo_consulta` (`nenhum`/`invalido` quando ausente/inválido), `rota`, `status`, `uri` (template), `method`, `outcome`, `exception` |
+| `consultas.blocos` (contador, um incremento por bloco pedido) | `bloco`, `consumidor`, `tipo_consulta`, `rota`, `status` |
+| `consultas.dependencia` (timer, um por chamada externa) | `dependencia` (`dynamodb`, `fonte_primaria`), `operacao` (`BatchGetItem`, `Query`... no DynamoDB; o bloco na fonte primária), `indice` (GSI ou `nenhum`, só DynamoDB) |
+| `consultas.etapa` (timer, um por etapa interna) | `etapa` (`consulta_gsi`, `batch`, `fan_out`, `filtro`); `indice` em `consulta_gsi` |
+
+- `x-consumidor` vira tag como veio (id da API key no gateway); fora de `[A-Za-z0-9._-]{1,64}` vira `invalido`.
+  Bloco fora do catálogo não vira tag. `id_operacao`, CPF/CNPJ e conta nunca são tag de métrica.
+- Spans: um por requisição HTTP (com `consumidor`, `tipo_consulta`, `rota`, `correlation_id` e os
+  identificadores da consulta), com filhos por etapa e por chamada externa. `traceparent` (W3C) recebido
+  continua o trace e segue para o gateway da fonte primária.
+  - OPERACAO na visão consolidada: `dynamodb BatchGetItem` direto sob o span HTTP.
+  - CLIENTE/CONTA: `consulta_gsi` (com os `dynamodb Query`) e `batch` (com os `dynamodb BatchGetItem` dos lotes).
+  - Fonte primária: `fan_out` com um `fonte_primaria <bloco>` por bloco pedido; 404 (bloco inexistente) não é erro.
+  - `filtro`, quando há `filter`.
+- Novos adapters (Valkey, SQS) e etapas usam `Observacoes.dependencia(...)` e `Observacoes.etapa(...)`
+  (`config.observabilidade`), que fixam nomes e tags. A camada de aplicação mede etapas pela porta
+  `ObservadorDeEtapas`, sem depender de Micrometer.
+- CPF/CNPJ e conta saem mascarados em todo atributo de span (`MascaramentoSpanFilter`, no exportador).
+- Buckets de histograma nos prazos do requisito não funcional (`management.metrics.distribution.slo`).
+- A aplicação amostra 100%; o **tail sampling** do Collector guarda todo trace com erro, com status 5xx ou
+  lento (OPERACAO > 80 ms, CLIENTE/CONTA > 200 ms) e 10% do resto.
+- `/actuator/metrics` exposto para inspeção.
+
 ## Subir o ambiente local
 
 Pré-requisito: Docker.
@@ -167,6 +199,13 @@ O `docker-compose.yml` sobe:
   desenvolvimento local: a tag não recebe patches de segurança.
 - **WireMock `3.13.2`** (porta 8089), simulando o gateway do mainframe com os stubs de `wiremock/mappings`.
 - **app**, construída pelo `Dockerfile`.
+- **OpenTelemetry Collector** `otel/opentelemetry-collector-contrib:0.165.0` (OTLP em `4317`/`4318`).
+- **Jaeger v2** `jaegertracing/jaeger:2.23.0`: traces em http://localhost:16686.
+- **Prometheus** `prom/prometheus:v3.16.0`: http://localhost:9090.
+- **Grafana** `grafana/grafana:13.3.1`: http://localhost:3000 (anônimo, somente leitura; `admin`/`admin`
+  para editar). Datasources Prometheus e Jaeger e o dashboard *Consultas de Operações de Crédito*
+  (latência por tipo de consulta e rota, latência por dependência, erros, blocos mais pedidos, consumo
+  por consumidor) são provisionados de `observabilidade/grafana/`.
 
 O script `localstack/init/ready.d/01-visao-consolidada.sh` cria a tabela `operacoes-credito`
 (PK `numero_operacao`, SK `custodia_expand`), os GSIs esparsos `gsi-cliente` e `gsi-conta`
@@ -215,6 +254,8 @@ CONSULTAS_DYNAMODB_CREDENCIAIS_ACCESS_KEY_ID=test CONSULTAS_DYNAMODB_CREDENCIAIS
 | `consultas.fonte-primaria.url` | `CONSULTAS_FONTE_PRIMARIA_URL` | `http://localhost:8089` |
 | `consultas.fonte-primaria.layouts` | — | `classpath:trancode/layouts/` |
 | `consultas.fonte-primaria.pool.*` | — | `max-conexoes` 50, `max-conexoes-por-rota` 50, `ttl` 5m, `keep-alive` 30s, `timeout-conexao` 200ms, `timeout-obter-conexao` 50ms, `timeout-resposta` 1s |
+| Endpoint OTLP (traces e métricas) | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` (só métricas; traces só com a variável) |
+| `management.opentelemetry.resource-attributes.deployment.environment.name` | `CONSULTAS_AMBIENTE` | `local` |
 
 ## Testes
 

@@ -5,8 +5,10 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.micrometer.tracing.test.autoconfigure.AutoConfigureTracing;
 import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureRestTestClient;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.client.EntityExchangeResult;
@@ -14,6 +16,10 @@ import org.springframework.test.web.servlet.client.RestTestClient;
 import org.springframework.web.client.RestClient;
 import org.testcontainers.containers.GenericContainer;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
@@ -26,6 +32,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureRestTestClient
+// Sem isto o Spring Boot desliga o tracing nos testes, e o traceparent não é propagado ao gateway
+@AutoConfigureTracing
 @Import({VisaoConsolidadaContainers.class, FontePrimariaContainers.class})
 class FontePrimariaIT {
 
@@ -39,6 +47,9 @@ class FontePrimariaIT {
 
     private final RestTestClient client;
     private final GenericContainer<?> wireMock;
+
+    @LocalServerPort
+    private int porta;
 
     @Autowired
     FontePrimariaIT(RestTestClient client, @Qualifier("wireMock") GenericContainer<?> wireMock) {
@@ -151,13 +162,17 @@ class FontePrimariaIT {
     }
 
     @Test
-    void traceparentDaRequisicaoChegaAoGatewayNoMesmoTrace() {
+    void traceparentDaRequisicaoChegaAoGatewayNoMesmoTrace() throws Exception {
         var traceId = UUID.randomUUID().toString().replace("-", "");
-        client.get().uri(ROTA_FONTE_PRIMARIA + "?id_operacao=100000002")
+        // HttpClient puro: o RestTestClient é instrumentado e sobrescreveria o traceparent com o próprio trace
+        var requisicao = HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + porta + ROTA_FONTE_PRIMARIA + "?id_operacao=100000002"))
                 .header("x-tipo-consulta", "OPERACAO")
                 .header("traceparent", "00-" + traceId + "-00f067aa0ba902b7-01")
-                .exchange()
-                .expectStatus().isOk();
+                .build();
+        try (var http = HttpClient.newHttpClient()) {
+            assertThat(http.send(requisicao, HttpResponse.BodyHandlers.discarding()).statusCode()).isEqualTo(200);
+        }
 
         assertThat(chamadasAoGateway(Map.of("traceparent",
                 Map.of("matches", "00-" + traceId + "-[0-9a-f]{16}-0[01]")))).isEqualTo(2);
