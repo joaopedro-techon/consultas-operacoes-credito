@@ -30,12 +30,17 @@ jobs:
       - name: Imagem Docker
         run: docker build -t consultas-operacoes-credito:${{ github.sha }} .
 
-  # Terraform do API Gateway (infra/api-gateway): formatação e validação sem backend nem credenciais
+  # Terraform do API Gateway (infra/api-gateway) e dos serviços ECS (infra/ecs): formatação e validação sem
+  # backend nem credenciais
   terraform:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        diretorio: [infra/api-gateway, infra/ecs]
     defaults:
       run:
-        working-directory: infra/api-gateway
+        working-directory: ${{ matrix.diretorio }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
