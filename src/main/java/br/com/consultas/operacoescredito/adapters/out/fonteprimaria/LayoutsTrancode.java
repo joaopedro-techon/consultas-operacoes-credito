@@ -10,22 +10,31 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Layouts de trancode dos 9 blocos, um arquivo {@code <bloco>.yml} por bloco no diretório configurado.
+ * Layouts de trancode dos 9 blocos, um arquivo {@code <bloco>.yml} por bloco no diretório configurado, e o da
+ * lista de operações de um cliente ou conta ({@value #LISTA_OPERACOES}{@code .yml}).
  * Carregados e validados na subida: layout ausente ou inconsistente impede a aplicação de iniciar.
  */
 final class LayoutsTrancode {
+
+    /** Nome do layout da lista de operações de um cliente ou conta. */
+    static final String LISTA_OPERACOES = "lista_operacoes";
+    static final String CAMPO_ID_OPERACAO = "id_operacao";
+    static final String CAMPO_DATA_CONTRATACAO = "data_contratacao_operacao";
 
     private static final YAMLMapper YAML = YAMLMapper.builder()
             .enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS)
             .build();
 
     private final Map<Bloco, LayoutTrancode> layouts;
+    private final LayoutTrancode listaOperacoes;
 
-    private LayoutsTrancode(Map<Bloco, LayoutTrancode> layouts) {
+    private LayoutsTrancode(Map<Bloco, LayoutTrancode> layouts, LayoutTrancode listaOperacoes) {
         this.layouts = layouts;
+        this.listaOperacoes = listaOperacoes;
     }
 
     /** @param diretorio local dos layouts (ex.: {@code classpath:trancode/layouts/}) */
@@ -33,68 +42,94 @@ final class LayoutsTrancode {
         var base = diretorio.endsWith("/") ? diretorio : diretorio + "/";
         var layouts = new EnumMap<Bloco, LayoutTrancode>(Bloco.class);
         for (var bloco : Bloco.values()) {
-            var recurso = resourceLoader.getResource(base + bloco.nome() + ".yml");
-            try (var entrada = recurso.getInputStream()) {
-                var layout = YAML.readValue(entrada, LayoutTrancode.class);
-                validar(bloco, layout);
-                layouts.put(bloco, layout);
-            } catch (IOException | JacksonException e) {
-                throw new LayoutTrancodeInvalidoException(
-                        "Não foi possível ler o layout de trancode " + recurso.getDescription(), e);
-            }
+            layouts.put(bloco, ler(resourceLoader, base, bloco.nome()));
         }
-        return new LayoutsTrancode(layouts);
+        var listaOperacoes = ler(resourceLoader, base, LISTA_OPERACOES);
+        validarListaOperacoes(listaOperacoes);
+        return new LayoutsTrancode(layouts, listaOperacoes);
     }
 
     LayoutTrancode de(Bloco bloco) {
         return layouts.get(bloco);
     }
 
-    static void validar(Bloco bloco, LayoutTrancode layout) {
-        if (!bloco.nome().equals(layout.bloco())) {
-            throw invalido(bloco, "declara bloco '" + layout.bloco() + "'");
-        }
-        if (layout.estrutura() == null || layout.registro() == null) {
-            throw invalido(bloco, "exige estrutura e registro");
-        }
-        validarRegistro(bloco, layout.bloco(), layout.registro());
+    /** Layout da lista de operações de um cliente ou conta ({@code id_operacao} + data de contratação). */
+    LayoutTrancode listaOperacoes() {
+        return listaOperacoes;
     }
 
-    private static void validarRegistro(Bloco bloco, String caminho, LayoutTrancode.Registro registro) {
+    private static LayoutTrancode ler(ResourceLoader resourceLoader, String base, String nome) {
+        var recurso = resourceLoader.getResource(base + nome + ".yml");
+        try (var entrada = recurso.getInputStream()) {
+            var layout = YAML.readValue(entrada, LayoutTrancode.class);
+            validar(nome, layout);
+            return layout;
+        } catch (IOException | JacksonException e) {
+            throw new LayoutTrancodeInvalidoException(
+                    "Não foi possível ler o layout de trancode " + recurso.getDescription(), e);
+        }
+    }
+
+    static void validar(String nome, LayoutTrancode layout) {
+        if (!nome.equals(layout.bloco())) {
+            throw invalido(nome, "declara bloco '" + layout.bloco() + "'");
+        }
+        if (layout.estrutura() == null || layout.registro() == null) {
+            throw invalido(nome, "exige estrutura e registro");
+        }
+        validarRegistro(nome, layout.bloco(), layout.registro());
+    }
+
+    /** A lista precisa ser um bloco-lista com o id numérico e a data de contratação de cada operação. */
+    private static void validarListaOperacoes(LayoutTrancode layout) {
+        if (layout.estrutura() != LayoutTrancode.Estrutura.LISTA) {
+            throw invalido(LISTA_OPERACOES, "exige estrutura lista");
+        }
+        var tipos = new HashMap<String, TipoCampoTrancode>();
+        layout.registro().campos().forEach(campo -> tipos.put(campo.campo(), campo.tipo()));
+        if (tipos.get(CAMPO_ID_OPERACAO) != TipoCampoTrancode.NUMERO) {
+            throw invalido(LISTA_OPERACOES, "exige o campo " + CAMPO_ID_OPERACAO + " do tipo numero");
+        }
+        if (tipos.get(CAMPO_DATA_CONTRATACAO) != TipoCampoTrancode.DATA) {
+            throw invalido(LISTA_OPERACOES, "exige o campo " + CAMPO_DATA_CONTRATACAO + " do tipo data");
+        }
+    }
+
+    private static void validarRegistro(String nome, String caminho, LayoutTrancode.Registro registro) {
         if (registro.campos().isEmpty()) {
-            throw invalido(bloco, caminho + " não declara campos");
+            throw invalido(nome, caminho + " não declara campos");
         }
         var ordenados = new ArrayList<>(registro.campos());
         ordenados.sort(Comparator.comparingInt(LayoutTrancode.Campo::inicio));
         var fimAnterior = 0;
         for (var campo : ordenados) {
-            var nome = caminho + "." + campo.campo();
+            var nomeCampo = caminho + "." + campo.campo();
             if (campo.campo() == null || campo.campo().isBlank() || campo.tipo() == null) {
-                throw invalido(bloco, caminho + " tem campo sem nome ou sem tipo");
+                throw invalido(nome, caminho + " tem campo sem nome ou sem tipo");
             }
             if (campo.inicio() < 1 || campo.tamanho() < 1) {
-                throw invalido(bloco, nome + " exige inicio e tamanho positivos");
+                throw invalido(nome, nomeCampo + " exige inicio e tamanho positivos");
             }
             if (campo.inicio() <= fimAnterior) {
-                throw invalido(bloco, nome + " sobrepõe o campo anterior (posição " + campo.inicio() + ")");
+                throw invalido(nome, nomeCampo + " sobrepõe o campo anterior (posição " + campo.inicio() + ")");
             }
             try {
                 campo.tipo().validarFormato(campo.formato());
             } catch (RuntimeException e) {
-                throw invalido(bloco, nome + " tem formato inválido: " + e.getMessage());
+                throw invalido(nome, nomeCampo + " tem formato inválido: " + e.getMessage());
             }
             fimAnterior = campo.fim();
         }
         for (var lista : registro.listas()) {
             if (lista.registro() == null) {
-                throw invalido(bloco, caminho + "." + lista.campo() + " exige registro");
+                throw invalido(nome, caminho + "." + lista.campo() + " exige registro");
             }
-            validarRegistro(bloco, caminho + "." + lista.campo(), lista.registro());
+            validarRegistro(nome, caminho + "." + lista.campo(), lista.registro());
         }
     }
 
-    private static LayoutTrancodeInvalidoException invalido(Bloco bloco, String motivo) {
-        return new LayoutTrancodeInvalidoException("Layout de trancode do bloco " + bloco.nome() + ": " + motivo);
+    private static LayoutTrancodeInvalidoException invalido(String nome, String motivo) {
+        return new LayoutTrancodeInvalidoException("Layout de trancode " + nome + ": " + motivo);
     }
 
     static class LayoutTrancodeInvalidoException extends RuntimeException {

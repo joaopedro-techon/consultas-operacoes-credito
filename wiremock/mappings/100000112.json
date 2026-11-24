@@ -1,0 +1,121 @@
+{
+  "mappings": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "/mainframe/operacoes/100000112/blocos/amortizacoes"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "000"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "/mainframe/operacoes/100000112/blocos/componentes"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "004000000000100000112001001LIBERACAO           000000000100000ATIVO     000000000100000112002002IOF                 000000000000377ATIVO     000000000100000112003003IOF_FLAT            000000000000380ATIVO     000000000100000112004004SEGURO              000000000000000ATIVO     "
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "/mainframe/operacoes/100000112/blocos/controles_iof"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "002000000000100000112001001001000000000000127000000000000000          000000000100000112002001001000000000000250000000000000000          "
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "/mainframe/operacoes/100000112/blocos/operacao"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "000000000100000112ATIVA          2026-08-03          11222333000181"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "/mainframe/operacoes/100000112/blocos/originacao"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "000000000100000112AGENCIA             045  "
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "/mainframe/operacoes/100000112/blocos/parcelas"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "0020000000001000001120010012026-09-03000000000050000000000000001000ABERTA         0000000001000001120020012026-10-03000000000050000000000000001000ABERTA         "
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "/mainframe/operacoes/100000112/blocos/plano"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "00000000010000011200100100001000001268ATIVO          00100200000030000010000002000031999900001000000200001000000000500"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "/mainframe/operacoes/100000112/blocos/recebimentos"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "000"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "/mainframe/operacoes/100000112/blocos/saldo"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "000000000100000112000000000102000000812026-11-23002000000000100000112001001000000000051000000000000100000112002001000000000051000"
+      }
+    }
+  ]
+}
