@@ -1,12 +1,17 @@
 package br.com.consultas.operacoescredito.adapters.in.web;
 
+import br.com.consultas.operacoescredito.domain.Bloco;
+import br.com.consultas.operacoescredito.domain.CpfCnpj;
 import br.com.consultas.operacoescredito.domain.CriterioConsulta;
 import br.com.consultas.operacoescredito.domain.TipoConsulta;
 
 import java.util.Arrays;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -16,13 +21,16 @@ import java.util.stream.Collectors;
  * e converte o pedido em {@link CriterioConsulta}.
  */
 record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj, String conta,
-                          String limiteOperacoes) {
+                          String limiteOperacoes, String expand, String fields) {
 
     static final String HEADER_TIPO_CONSULTA = "x-tipo-consulta";
     static final String ID_OPERACAO = "id_operacao";
     static final String CPF_CNPJ = "cpf_cnpj";
     static final String CONTA = "conta";
     static final String LIMITE_OPERACOES = "limite_operacoes";
+    static final String EXPAND = "expand";
+    static final String FIELDS = "fields";
+    static final String FILTER = "filter";
 
     /** Parâmetro que identifica o que se consulta em cada tipo de consulta. */
     private static final Map<TipoConsulta, String> IDENTIFICADOR = new EnumMap<>(Map.of(
@@ -32,14 +40,82 @@ record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj
 
     private static final Set<TipoConsulta> ACEITAM_LIMITE = Set.of(TipoConsulta.CLIENTE, TipoConsulta.CONTA);
     private static final Pattern NUMERO_OPERACAO = Pattern.compile("[1-9]\\d{0,17}");
+    private static final Pattern DIGITOS = Pattern.compile("\\d+");
+    private static final Pattern LIMITE = Pattern.compile("\\d{1,4}");
 
     CriterioConsulta criterio() {
         var tipo = tipo();
         validarCoerencia(tipo);
         return switch (tipo) {
             case OPERACAO -> new CriterioConsulta.PorOperacao(idOperacaoNumerico());
-            case CLIENTE, CONTA -> throw new TipoConsultaNaoImplementadoException(tipo);
+            case CLIENTE -> new CriterioConsulta.PorCliente(cpfCnpjValido(), limite());
+            case CONTA -> new CriterioConsulta.PorConta(contaValida(), limite());
         };
+    }
+
+    private String cpfCnpjValido() {
+        if (!CpfCnpj.valido(cpfCnpj)) {
+            throw new RequisicaoInvalidaException("Parâmetro " + CPF_CNPJ + " deve ser um CPF (11 dígitos) ou CNPJ "
+                    + "(14 caracteres, numérico ou alfanumérico em maiúsculas) com dígito verificador válido");
+        }
+        return cpfCnpj;
+    }
+
+    private String contaValida() {
+        if (!DIGITOS.matcher(conta).matches()) {
+            throw new RequisicaoInvalidaException("Parâmetro " + CONTA + " deve conter só dígitos");
+        }
+        return conta;
+    }
+
+    /** {@code limite_operacoes} de 1 a 500; ausente devolve todas as operações. */
+    private OptionalInt limite() {
+        if (limiteOperacoes == null) {
+            return OptionalInt.empty();
+        }
+        var invalido = new RequisicaoInvalidaException("Parâmetro " + LIMITE_OPERACOES
+                + " deve ser um inteiro de 1 a " + CriterioConsulta.LIMITE_OPERACOES_MAXIMO);
+        if (!LIMITE.matcher(limiteOperacoes).matches()) {
+            throw invalido;
+        }
+        int limite = Integer.parseInt(limiteOperacoes);
+        if (limite < 1 || limite > CriterioConsulta.LIMITE_OPERACOES_MAXIMO) {
+            throw invalido;
+        }
+        return OptionalInt.of(limite);
+    }
+
+    /**
+     * Blocos pedidos no {@code expand} (lista separada por vírgula, nomes canônicos).
+     * Ausente ou vazio: nenhum bloco além dos que vêm sempre.
+     */
+    Set<Bloco> blocos() {
+        if (expand == null || expand.isBlank()) {
+            return Set.of();
+        }
+        var blocos = EnumSet.noneOf(Bloco.class);
+        for (var nome : expand.split(",", -1)) {
+            var nomeLimpo = nome.strip();
+            blocos.add(Bloco.porNome(nomeLimpo).orElseThrow(() -> blocoDesconhecido(nomeLimpo)));
+        }
+        return blocos;
+    }
+
+    /**
+     * Itens do {@code fields} (lista separada por vírgula, {@code bloco.campo}), sem espaços nas pontas.
+     * Ausente ou vazio: nenhum. A validação contra o catálogo é do caso de uso.
+     */
+    List<String> campos() {
+        if (fields == null || fields.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(fields.split(",", -1)).map(String::strip).toList();
+    }
+
+    private static RequisicaoInvalidaException blocoDesconhecido(String nome) {
+        var validos = Arrays.stream(Bloco.values()).map(Bloco::nome).collect(Collectors.joining(", "));
+        return new RequisicaoInvalidaException(
+                "Bloco '" + nome + "' inválido no parâmetro " + EXPAND + ". Blocos válidos: " + validos);
     }
 
     private TipoConsulta tipo() {

@@ -13,7 +13,7 @@
 
     <groupId>br.com.consultas</groupId>
     <artifactId>consultas-operacoes-credito</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
     <name>consultas-operacoes-credito</name>
     <description>API de consulta de operações de crédito (Custódia de Ativos PF)</description>
 
@@ -21,6 +21,7 @@
         <java.version>25</java.version>
         <aws-sdk.version>2.59.7</aws-sdk.version>
         <archunit.version>1.5.1</archunit.version>
+        <rsql-parser.version>2.3.3</rsql-parser.version>
     </properties>
 
     <dependencyManagement>
@@ -52,9 +53,30 @@
             <groupId>io.micrometer</groupId>
             <artifactId>context-propagation</artifactId>
         </dependency>
+        <!-- Métricas e traces via OTLP (inclui a ponte Micrometer Tracing -> OpenTelemetry e o traceparent W3C) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-opentelemetry</artifactId>
+        </dependency>
+        <!-- Fork mantido do cz.jirutka.rsql:rsql-parser (sem release desde 2016); mesma API e pacote. -->
+        <dependency>
+            <groupId>io.github.nstdio</groupId>
+            <artifactId>rsql-parser</artifactId>
+            <version>${rsql-parser.version}</version>
+        </dependency>
+        <!-- Fonte primária: @HttpExchange sobre RestClient + Apache HttpClient 5 com pool -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-restclient</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.httpcomponents.client5</groupId>
+            <artifactId>httpclient5</artifactId>
+        </dependency>
+        <!-- Layouts de trancode em YAML -->
+        <dependency>
+            <groupId>tools.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-yaml</artifactId>
         </dependency>
 
         <dependency>

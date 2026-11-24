@@ -5,3 +5,5 @@ target/
 .vscode/
 hs_err_pid*.log
 .claude/worktrees/
+
+__pycache__/

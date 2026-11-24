@@ -42,7 +42,7 @@ class ConsultaOperacaoIT {
                           "operacao": {
                             "id_operacao": 100000001,
                             "situacao_operacao_credito": "ATIVA",
-                            "data_contratacao_operacao": "2026-11-21",
+                            "data_contratacao_operacao": "2026-05-21",
                             "data_baixa_operacao": null,
                             "cpf_cnpj": "52998224725"
                           },
@@ -90,21 +90,6 @@ class ConsultaOperacaoIT {
                 .expectBody()
                 .jsonPath("$.detail").value(String.class, detail -> assertThat(detail)
                         .contains("CONTRATO", "OPERACAO", "CLIENTE", "CONTA"));
-    }
-
-    @ParameterizedTest(name = "{0} ainda não disponível -> 501")
-    @CsvSource(delimiter = '|', textBlock = """
-            CLIENTE | cpf_cnpj=52998224725
-            CONTA   | conta=434115000065874
-            """)
-    void tiposDeConsultaAindaNaoDisponiveisDevolvem501(String tipoConsulta, String query) {
-        client.get().uri(ROTA + "?" + query)
-                .header("x-tipo-consulta", tipoConsulta)
-                .exchange()
-                .expectStatus().isEqualTo(501)
-                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
-                .expectBody()
-                .jsonPath("$.detail").value(String.class, detail -> assertThat(detail).contains(tipoConsulta));
     }
 
     @ParameterizedTest(name = "{0} com {1} -> 400")
