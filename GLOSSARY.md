@@ -18,6 +18,13 @@ Conta do cliente à qual operações de crédito estão vinculadas.
 **Originação**:
 Circunstâncias da contratação da operação: canal de contratação e dependência contábil.
 
+**Custódia**:
+Sistema em que a operação de crédito está registrada: SF, F5, OD ou NSF. Cada operação está em uma única custódia, mas pode migrar de uma para outra ao longo da vida. O consumidor não informa a custódia; ela volta no campo `custodia` do bloco `operacao`.
+_Avoid_: origem, carteira, sistema (sozinho)
+
+**Precedência de custódia**:
+Ordem que decide a custódia de uma operação encontrada em mais de uma ao mesmo tempo: NSF, depois SF, F5 e OD. Todos os blocos vêm da custódia que vence.
+
 ## Dados financeiros
 
 **Componente financeiro**:
@@ -50,7 +57,17 @@ Cada um dos conjuntos de dados que a consulta pode trazer de uma operação: `op
 _Avoid_: expand (como substantivo), domínio, seção
 
 **Bloco indisponível**:
-Bloco pedido que a visão consolidada ainda não tem para a operação; volta `null` e é listado no header `x-blocos-indisponiveis`. Um bloco-lista vazio não é indisponível.
+Bloco pedido que não pôde ser entregue para a operação: a visão consolidada ainda não o tem, ou a fonte primária falhou ao lê-lo enquanto os demais blocos responderam. Volta `null` e é listado no header `x-blocos-indisponiveis`; os outros blocos seguem na resposta. Um bloco-lista vazio não é indisponível, e um bloco-lista nunca volta truncado.
+
+**Descoberta de custódia**:
+Etapa que encontra em qual custódia a operação está, procurando-a em todas as custódias quando ainda não se sabe.
+
+**Custódia indisponível**:
+Custódia que não pôde ser consultada (falha ou proteção aberta). Se a operação não foi achada nas demais, não se pode afirmar que ela não existe: a consulta falha com 503, e não com 404.
+
+**Página de ocorrências**:
+Parte de um bloco-lista, ou de uma lista de operações, devolvida pela fonte primária em uma chamada: no máximo 30 ocorrências. A fonte primária só informa se há mais páginas e entrega a chave de continuação para pedir a próxima.
+_Avoid_: lote (reservado ao BatchGetItem)
 
 **Catálogo de campos**:
 Configuração que declara, por bloco, os campos válidos e o tipo de cada um (número, decimal, data, data-hora, texto, booleano, objeto, lista). Valida `fields`/`filter` e tipa as comparações do filtro (ADR-0005).
@@ -74,12 +91,18 @@ Cópia de leitura das operações, otimizada para rapidez e eventualmente consis
 Cópia temporária (Valkey, TTL) do `texto_detalhe` de cada bloco de uma operação já lido da visão consolidada, com chave `op:{id_operacao}:{bloco}`. Só otimização: indisponível, a consulta segue no DynamoDB (fail-open). Não guarda a lista de operações de um cliente ou conta e não vale para a fonte primária (ADR-0002).
 _Avoid_: cache de consulta, cache de resposta
 
+**Cache de custódia**:
+Lembrança temporária (Valkey, TTL) de em qual custódia uma operação foi encontrada, usada pelas duas rotas para pular a descoberta de custódia. Guarda só a custódia, nunca dados da operação; se a custódia lembrada não tem mais a operação, a lembrança é descartada e a descoberta é refeita (ADR-0012).
+
 **Fonte primária**:
 Sistema de origem das operações (mainframe DB2), consultado quando se precisa do dado sem defasagem.
 _Avoid_: origem (confunde com Originação)
 
+**Cota da fonte primária**:
+Quantidade máxima de chamadas por segundo que o mainframe aceita de toda a API, somadas todas as instâncias. Esgotada, a consulta é recusada com 429, sem esperar (ADR-0015).
+
 **Trancode**:
-Texto de posições fixas devolvido pela fonte primária, em que cada faixa de posições representa um campo de um bloco.
+Texto de posições fixas devolvido pela fonte primária, em que cada faixa de posições representa um campo de um bloco. Cada custódia tem o seu layout de trancode por bloco, mas todos são lidos para o mesmo contrato.
 
 **Consumidor**:
 Sistema que chama a API, identificado pela sua chave de acesso.
