@@ -21,5 +21,10 @@ jobs:
       # Testes HTTP de caixa-preta sobem o LocalStack com Testcontainers (Docker do runner)
       - name: Build e testes
         run: ./mvnw -B verify
+      - name: docker-compose e Collector válidos
+        run: |
+          docker compose config -q
+          docker run --rm -v "$PWD/observabilidade/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+            otel/opentelemetry-collector-contrib:0.165.0 validate --config=/etc/otelcol-contrib/config.yaml
       - name: Imagem Docker
         run: docker build -t consultas-operacoes-credito:${{ github.sha }} .
