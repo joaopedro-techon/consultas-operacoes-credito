@@ -180,10 +180,108 @@ class SqsPublicadorDeEventosDeConsumoTest {
         assertThat(descartados("encerramento")).isEqualTo(1);
     }
 
+    @Test
+    void encerramentoComSqsTravadoRespeitaOTempoMaximoEContaOQueNaoSaiu() {
+        publicador = iniciar(100, Duration.ofHours(1), CircuitBreaker.ofDefaults("sqs"), bulkhead(4, 1000),
+                Duration.ofMillis(300));
+        sqs.pausar();
+        for (int i = 0; i < 35; i++) {
+            publicador.publicar(evento("c-" + i));
+        }
+
+        var inicio = System.nanoTime();
+        publicador.stop();
+
+        assertThat(Duration.ofNanos(System.nanoTime() - inicio)).isLessThan(Duration.ofSeconds(2));
+        assertThat(contador(SqsPublicadorDeEventosDeConsumo.METRICA_ENVIADOS) + todosOsDescartados())
+                .as("todo evento enviado ou contado").isEqualTo(35);
+        assertThat(descartados("encerramento")).isPositive();
+    }
+
+    @Test
+    void eventosPublicadosDuranteOEncerramentoSaoEnviadosOuContados() throws InterruptedException {
+        publicador = iniciar(10_000, Duration.ofMillis(5), CircuitBreaker.ofDefaults("sqs"), bulkhead(4, 1000));
+        var publicados = new AtomicInteger();
+        var publicadores = new java.util.ArrayList<Thread>();
+        for (int t = 0; t < 4; t++) {
+            publicadores.add(Thread.ofVirtual().start(() -> {
+                for (int i = 0; i < 2_000; i++) {
+                    publicador.publicar(evento("c-" + i));
+                    publicados.incrementAndGet();
+                }
+            }));
+        }
+        Thread.sleep(5);
+
+        publicador.stop();
+        for (var thread : publicadores) {
+            thread.join();
+        }
+
+        assertThat(contador(SqsPublicadorDeEventosDeConsumo.METRICA_ENVIADOS) + todosOsDescartados())
+                .as("nenhum evento perdido sem contagem").isEqualTo(publicados.get());
+    }
+
+    @Test
+    void drenadorEsperandoVagaNoBulkheadEInterrompidoPeloEncerramentoSemPerderOLote() throws InterruptedException {
+        publicador = iniciar(100, Duration.ofMillis(10), CircuitBreaker.ofDefaults("sqs"), bulkhead(1, 60_000),
+                Duration.ofMillis(500));
+        sqs.pausar();
+        publicador.publicar(evento("primeiro"));
+        await().atMost(Duration.ofSeconds(5)).until(() -> sqs.emAndamento() == 1);
+        // O drenador fica esperando a única vaga do bulkhead para o segundo lote
+        publicador.publicar(evento("segundo"));
+        Thread.sleep(200);
+
+        publicador.stop();
+
+        assertThat(contador(SqsPublicadorDeEventosDeConsumo.METRICA_ENVIADOS) + todosOsDescartados()).isEqualTo(2);
+        assertThat(descartados("encerramento")).isEqualTo(2);
+    }
+
+    @Test
+    void falhaInesperadaAoDespacharDescartaOLoteEODrenadorContinua() {
+        publicador = iniciar(100, Duration.ofMillis(10), CircuitBreaker.ofDefaults("sqs"),
+                falhaNaPrimeiraPermissao(bulkhead(4, 1000)));
+
+        publicador.publicar(evento("perdido"));
+        await().atMost(Duration.ofSeconds(5)).until(() -> descartados("falha_envio") == 1);
+        publicador.publicar(evento("enviado"));
+
+        await().atMost(Duration.ofSeconds(5)).until(() -> contador(SqsPublicadorDeEventosDeConsumo.METRICA_ENVIADOS) == 1);
+        assertThat(descartados("fila_cheia")).isZero();
+    }
+
+    /** Bulkhead real, exceto a primeira {@code acquirePermission}, que falha com um erro inesperado. */
+    private static Bulkhead falhaNaPrimeiraPermissao(Bulkhead real) {
+        var primeira = new java.util.concurrent.atomic.AtomicBoolean(true);
+        return (Bulkhead) java.lang.reflect.Proxy.newProxyInstance(Bulkhead.class.getClassLoader(),
+                new Class<?>[]{Bulkhead.class}, (proxy, metodo, argumentos) -> {
+                    if (metodo.getName().equals("acquirePermission") && primeira.getAndSet(false)) {
+                        throw new IllegalStateException("inesperada");
+                    }
+                    try {
+                        return metodo.invoke(real, argumentos);
+                    } catch (java.lang.reflect.InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+    }
+
+    private double todosOsDescartados() {
+        return metricas.get(SqsPublicadorDeEventosDeConsumo.METRICA_DESCARTADOS).counters().stream()
+                .mapToDouble(contador -> contador.count()).sum();
+    }
+
     private SqsPublicadorDeEventosDeConsumo iniciar(int capacidade, Duration intervalo, CircuitBreaker circuito,
                                                     Bulkhead bulkhead) {
+        return iniciar(capacidade, intervalo, circuito, bulkhead, Duration.ofSeconds(5));
+    }
+
+    private SqsPublicadorDeEventosDeConsumo iniciar(int capacidade, Duration intervalo, CircuitBreaker circuito,
+                                                    Bulkhead bulkhead, Duration tempoMaximoDrenagem) {
         var properties = new EventosSqsProperties(true,
-                new EventosSqsProperties.Fila(capacidade, 10, intervalo, Duration.ofSeconds(5)),
+                new EventosSqsProperties.Fila(capacidade, 10, intervalo, tempoMaximoDrenagem),
                 new EventosSqsProperties.Sqs(URL_FILA, null, "sa-east-1", null, Duration.ofSeconds(1),
                         Duration.ofSeconds(3)));
         var novo = new SqsPublicadorDeEventosDeConsumo(sqs, properties, circuito, bulkhead,
