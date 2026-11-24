@@ -1,5 +1,6 @@
 package br.com.consultas.operacoescredito.adapters.in.web;
 
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -50,11 +51,13 @@ class OperacoesCreditoController {
             @RequestParam(name = ParametrosConsulta.LIMITE_OPERACOES, required = false) String limiteOperacoes,
             @RequestParam(name = ParametrosConsulta.EXPAND, required = false) String expand,
             @RequestParam(name = ParametrosConsulta.FIELDS, required = false) String fields,
-            @RequestParam(name = ParametrosConsulta.FILTER, required = false) String filter) {
+            @RequestParam(name = ParametrosConsulta.FILTER, required = false) String filter,
+            HttpServletRequest requisicao) {
         var parametros = new ParametrosConsulta(tipoConsulta, idOperacao, cpfCnpj, conta, limiteOperacoes, expand, fields);
         var consultarOperacoes = rota == null ? visaoConsolidada : fontePrimaria;
         var operacoes = consultarOperacoes.consultar(new Consulta(
                 parametros.criterio(), parametros.blocos(), parametros.campos(), FiltroRsql.traduzir(filter)));
+        requisicao.setAttribute(RegistroDeConsumoHttp.ATRIBUTO_QUANTIDADE_OPERACOES, operacoes.size());
         var resposta = ResponseEntity.ok();
         blocosIndisponiveis(operacoes).ifPresent(blocos -> resposta.header(HEADER_BLOCOS_INDISPONIVEIS, blocos));
         return resposta.body(ConsultaResponse.de(operacoes));

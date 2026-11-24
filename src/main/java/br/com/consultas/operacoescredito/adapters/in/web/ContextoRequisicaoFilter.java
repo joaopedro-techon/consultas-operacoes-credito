@@ -1,5 +1,6 @@
 package br.com.consultas.operacoescredito.adapters.in.web;
 
+import br.com.consultas.operacoescredito.config.observabilidade.CacheDaRequisicao;
 import br.com.consultas.operacoescredito.domain.TipoConsulta;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -16,6 +17,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.servlet.HandlerExceptionResolver;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -27,7 +29,8 @@ import java.util.stream.Collectors;
 /**
  * Resolve o contexto da requisição antes de qualquer processamento: {@code x-correlationid}
  * (validado ou gerado), {@code x-consumidor}, tipo de consulta e rota vão para o MDC, o
- * correlationId volta no header da resposta e, ao final, sai um log de acesso e o MDC é limpo.
+ * correlationId volta no header da resposta e, ao final, sai um log de acesso, o evento de consumo das rotas de
+ * consulta ({@link RegistroDeConsumoHttp}, com os hits e misses de cache da requisição) e o MDC é limpo.
  * Roda logo depois do {@code ServerHttpObservationFilter} (ordem {@code HIGHEST_PRECEDENCE + 1}),
  * para que até a rejeição de um {@code x-correlationid} inválido seja medida e tenha span, e o log
  * de acesso saia com o {@code trace_id}.
@@ -53,9 +56,12 @@ class ContextoRequisicaoFilter extends OncePerRequestFilter {
             .collect(Collectors.toUnmodifiableSet());
 
     private final HandlerExceptionResolver resolvedorDeErros;
+    private final RegistroDeConsumoHttp registroDeConsumo;
 
-    ContextoRequisicaoFilter(@Qualifier("handlerExceptionResolver") HandlerExceptionResolver resolvedorDeErros) {
+    ContextoRequisicaoFilter(@Qualifier("handlerExceptionResolver") HandlerExceptionResolver resolvedorDeErros,
+                             RegistroDeConsumoHttp registroDeConsumo) {
         this.resolvedorDeErros = resolvedorDeErros;
+        this.registroDeConsumo = registroDeConsumo;
     }
 
     @Override
@@ -67,6 +73,8 @@ class ContextoRequisicaoFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         var inicio = System.nanoTime();
+        var instanteInicio = Instant.now();
+        var cache = CacheDaRequisicao.iniciar();
         var correlationIdRecebido = request.getHeader(HEADER_CORRELATION_ID);
         var correlationIdValido = correlationIdRecebido == null || CORRELATION_ID_VALIDO.matcher(correlationIdRecebido).matches();
         var correlationId = correlationIdRecebido != null && correlationIdValido
@@ -86,13 +94,17 @@ class ContextoRequisicaoFilter extends OncePerRequestFilter {
                         "Header " + HEADER_CORRELATION_ID + " inválido: use até 64 caracteres [A-Za-z0-9-]"));
             }
         } finally {
-            registrarAcesso(request, response, inicio);
+            var duracaoMs = (System.nanoTime() - inicio) / 1_000_000;
+            registrarAcesso(request, response, duracaoMs);
+            if (RegistroDeConsumoHttp.ehConsulta(request)) {
+                registroDeConsumo.registrar(request, response, instanteInicio, duracaoMs, correlationId, cache);
+            }
+            CacheDaRequisicao.encerrar();
             MDC.clear();
         }
     }
 
-    private static void registrarAcesso(HttpServletRequest request, HttpServletResponse response, long inicio) {
-        var duracaoMs = (System.nanoTime() - inicio) / 1_000_000;
+    private static void registrarAcesso(HttpServletRequest request, HttpServletResponse response, long duracaoMs) {
         var log = ACESSO.atInfo()
                 .addKeyValue("metodo", request.getMethod())
                 .addKeyValue("uri", request.getRequestURI())

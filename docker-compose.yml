@@ -7,9 +7,10 @@ services:
     ports:
       - "4566:4566"
     environment:
-      SERVICES: dynamodb
+      SERVICES: dynamodb,sqs
       AWS_DEFAULT_REGION: sa-east-1
       CONSULTAS_DYNAMODB_TABELA: operacoes-credito
+      CONSULTAS_EVENTOS_FILA: consultas-eventos-consumo
     volumes:
       - ./localstack/init/ready.d:/etc/localstack/init/ready.d:ro
       - ./localstack/massa:/etc/localstack/massa:ro
@@ -58,6 +59,13 @@ services:
       CONSULTAS_FONTE_PRIMARIA_URL: http://wiremock:8080
       CONSULTAS_VALKEY_HOST: valkey
       CONSULTAS_VALKEY_PORTA: "6379"
+      # Evento de consumo (ADR-0004): fila criada por localstack/init/ready.d/00-eventos-consumo.sh.
+      # Segredo do HMAC só para desenvolvimento local; nos ambientes reais vem de um cofre de segredos.
+      CONSULTAS_EVENTOS_SQS_ENDPOINT: http://localstack:4566
+      CONSULTAS_EVENTOS_SQS_URL_FILA: http://localstack:4566/000000000000/consultas-eventos-consumo
+      CONSULTAS_EVENTOS_SQS_CREDENCIAIS_ACCESS_KEY_ID: test
+      CONSULTAS_EVENTOS_SQS_CREDENCIAIS_SECRET_ACCESS_KEY: test
+      CONSULTAS_EVENTOS_SEGREDO_HMAC: segredo-local-somente-desenvolvimento
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8080 && printf \"GET /actuator/health/readiness HTTP/1.0\r\n\r\n\" >&3 && grep -q UP <&3'"]

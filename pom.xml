@@ -13,7 +13,7 @@
 
     <groupId>br.com.consultas</groupId>
     <artifactId>consultas-operacoes-credito</artifactId>
-    <version>1.1.0</version>
+    <version>1.2.0</version>
     <name>consultas-operacoes-credito</name>
     <description>API de consulta de operações de crédito (Custódia de Ativos PF)</description>
 
@@ -61,6 +61,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>apache5-client</artifactId>
+        </dependency>
+        <!-- Evento de consumo (ADR-0004) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sqs</artifactId>
         </dependency>
         <dependency>
             <groupId>io.micrometer</groupId>
