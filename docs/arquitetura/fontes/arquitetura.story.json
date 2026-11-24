@@ -1,0 +1,73 @@
+{
+  "version": 2,
+  "title": "Como uma consulta percorre a visão consolidada",
+  "intro": "API só de leitura sobre a visão consolidada (DynamoDB).",
+  "outro": "Só o DynamoDB é obrigatório; cache e evento nunca derrubam a consulta.",
+  "scenes": [
+    {
+      "title": "Entrada: do consumidor ao serviço",
+      "points": [
+        {
+          "anchor": "alb",
+          "via": [
+            "c-req",
+            "c-proxy"
+          ],
+          "title": "API Gateway e ALB",
+          "text": "O gateway exige a x-api-key e aplica o Usage Plan; o ALB separa os serviços por path.",
+          "caption": "O consumidor chama GET /v1/operacoes-credito."
+        },
+        {
+          "anchor": "vc",
+          "via": "c-rota",
+          "title": "visao-consolidada",
+          "text": "Valida parâmetros e inicia o prazo da requisição.",
+          "caption": "A requisição chega ao serviço ECS."
+        }
+      ]
+    },
+    {
+      "title": "Leitura: cache primeiro, DynamoDB depois",
+      "points": [
+        {
+          "anchor": "valkey",
+          "via": "c-cache",
+          "title": "Valkey",
+          "text": "Blocos e custódia num só MGET; fail-open.",
+          "caption": "Primeiro, o cache no Valkey."
+        },
+        {
+          "anchor": "dynamodb",
+          "via": "c-ddb",
+          "title": "DynamoDB",
+          "text": "BatchGetItem só dos blocos ausentes; GSI para CLIENTE e CONTA.",
+          "caption": "O que faltou vem do DynamoDB."
+        }
+      ]
+    },
+    {
+      "title": "Depois da resposta",
+      "points": [
+        {
+          "anchor": "sqs",
+          "via": "c-evento",
+          "title": "Evento de consumo",
+          "text": "Assíncrono, em lote; nunca atrasa a resposta.",
+          "caption": "Responde e publica o evento de consumo."
+        },
+        {
+          "anchor": "mainframe",
+          "via": [
+            "c-fp",
+            "c-fp-cache",
+            "c-fp-evento"
+          ],
+          "action": "parallel",
+          "title": "fonte-primaria (outro repositório)",
+          "text": "Mesmo ALB; compartilha custódia e fila.",
+          "caption": "A fonte primária é outro serviço."
+        }
+      ]
+    }
+  ]
+}

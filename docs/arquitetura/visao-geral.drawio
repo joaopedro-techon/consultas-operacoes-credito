@@ -1,0 +1,83 @@
+<mxfile host="drawio">
+  <diagram id="visao-geral" name="Visão geral">
+    <mxGraphModel adaptiveColors="auto" dx="1200" dy="800" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="titulo" value="&lt;b&gt;consultas-operacoes-credito&lt;/b&gt; · visão consolidada na AWS" style="text;html=1;align=left;verticalAlign=middle;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="560" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="aws" value="AWS" style="points=[[0,0],[0.25,0],[0.5,0],[0.75,0],[1,0],[1,0.25],[1,0.5],[1,0.75],[1,1],[0.75,1],[0.5,1],[0.25,1],[0,1],[0,0.75],[0,0.5],[0,0.25]];outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=12;fontStyle=1;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_aws_cloud_alt;strokeColor=#232F3E;fillColor=none;verticalAlign=top;align=left;spacingLeft=30;dashed=0;" vertex="1" parent="1">
+          <mxGeometry x="170" y="140" width="950" height="610" as="geometry"/>
+        </mxCell>
+        <mxCell id="otel" value="&lt;b&gt;OTel Collector&lt;/b&gt;&lt;br&gt;métricas + traces" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;dashed=1;fillColor=none;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="920" y="60" width="150" height="46" as="geometry"/>
+        </mxCell>
+        <mxCell id="consumidor" value="&lt;b&gt;Consumidor&lt;/b&gt;&lt;br&gt;sistema com API key" style="sketch=0;outlineConnect=0;gradientColor=none;fillColor=#232F3D;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.users;" vertex="1" parent="1">
+          <mxGeometry x="50" y="230" width="64" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="apigw" value="&lt;b&gt;API Gateway&lt;/b&gt;&lt;br&gt;API key + Usage Plan" style="sketch=0;outlineConnect=0;fillColor=#E7157B;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.api_gateway;" vertex="1" parent="1">
+          <mxGeometry x="240" y="230" width="64" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="alb" value="&lt;b&gt;ALB&lt;/b&gt;&lt;br&gt;regra por path" style="sketch=0;outlineConnect=0;gradientColor=none;fillColor=#8C4FFF;strokeColor=none;dashed=0;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.application_load_balancer;verticalLabelPosition=top;verticalAlign=bottom;" vertex="1" parent="1">
+          <mxGeometry x="430" y="230" width="64" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="vc" value="&lt;b&gt;visao-consolidada&lt;/b&gt;&lt;br&gt;serviço ECS Fargate&lt;br&gt;Spring Boot 4 · Java 25" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;spacingLeft=56;arcSize=10;strokeColor=#ED7100;strokeWidth=2;fillColor=#FFF4E8;" vertex="1" parent="1">
+          <mxGeometry x="680" y="222" width="200" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="vc-icone" value="" style="sketch=0;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;dashed=0;html=1;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.fargate;" vertex="1" parent="1">
+          <mxGeometry x="692" y="242" width="40" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="dynamodb" value="&lt;b&gt;DynamoDB&lt;/b&gt;&lt;br&gt;visão consolidada&lt;br&gt;tabela base + GSI" style="sketch=0;outlineConnect=0;fillColor=#C925D1;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.dynamodb;" vertex="1" parent="1">
+          <mxGeometry x="990" y="230" width="64" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="valkey" value="&lt;b&gt;Valkey&lt;/b&gt; (ElastiCache)&lt;br&gt;cache de blocos&lt;br&gt;cache de custódia" style="sketch=0;outlineConnect=0;fillColor=#C925D1;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.elasticache;" vertex="1" parent="1">
+          <mxGeometry x="580" y="450" width="64" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="sqs" value="&lt;b&gt;SQS&lt;/b&gt;&lt;br&gt;evento de consumo" style="sketch=0;outlineConnect=0;fillColor=#E7157B;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.sqs;" vertex="1" parent="1">
+          <mxGeometry x="860" y="450" width="64" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="fp" value="&lt;b&gt;fonte-primaria&lt;/b&gt;&lt;br&gt;outro repositório (mainframe)" style="sketch=0;outlineConnect=0;fillColor=#ED7100;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=2;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.fargate;opacity=35;textOpacity=55;" vertex="1" parent="1">
+          <mxGeometry x="720" y="610" width="64" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="e-req" value="HTTPS&lt;br&gt;x-api-key" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;fontSize=10;labelBackgroundColor=default;" edge="1" parent="1" source="consumidor" target="apigw">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e-proxy" value="HTTP_PROXY&lt;br&gt;+ x-consumidor" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;fontSize=10;labelBackgroundColor=default;" edge="1" parent="1" source="apigw" target="alb">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e-rota" value="/v1/operacoes-credito*" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;fontSize=10;labelBackgroundColor=default;" edge="1" parent="1" source="alb" target="vc">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e-ddb" value="BatchGetItem&lt;br&gt;Query no GSI" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;fontSize=10;labelBackgroundColor=default;" edge="1" parent="1" source="vc" target="dynamodb">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e-cache" value="MGET / SET&lt;br&gt;fail-open" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=1.5;fontSize=10;labelBackgroundColor=default;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="vc" target="valkey">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint as="offset" x="0" y="-10"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-evento" value="evento de consumo&lt;br&gt;(assíncrono)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=1.5;dashed=1;fontSize=10;labelBackgroundColor=default;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="vc" target="sqs">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint as="offset" x="0" y="-10"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-otel" value="OTLP" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=1.5;dashed=1;fontSize=10;labelBackgroundColor=default;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="vc" target="otel">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e-fp" value="/fonte-primaria" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=1.5;dashed=1;fontSize=10;labelBackgroundColor=default;opacity=40;textOpacity=60;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="alb" target="fp">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e-fp-cache" value="custódia" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=1.5;dashed=1;fontSize=10;labelBackgroundColor=default;opacity=40;textOpacity=60;exitX=0.25;exitY=0;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="fp" target="valkey">
+          <mxGeometry x="-0.55" relative="1" as="geometry"><mxPoint as="offset" x="-28" y="0"/></mxGeometry>
+        </mxCell>
+        <mxCell id="e-fp-evento" value="evento" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=1.5;dashed=1;fontSize=10;labelBackgroundColor=default;opacity=40;textOpacity=60;exitX=0.75;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="fp" target="sqs">
+          <mxGeometry x="-0.55" relative="1" as="geometry"><mxPoint as="offset" x="24" y="0"/></mxGeometry>
+        </mxCell>
+        <mxCell id="legenda" value="&lt;b&gt;Linha cheia&lt;/b&gt;: caminho síncrono da consulta · &lt;b&gt;Tracejada&lt;/b&gt;: assíncrona ou de outro serviço · &lt;b&gt;Esmaecido&lt;/b&gt;: fora deste repositório (contexto)&lt;br&gt;Valkey e SQS são compartilhados com a fonte-primaria (ADR-0017). Valkey fora ou lento: a consulta segue no DynamoDB." style="text;html=1;align=left;verticalAlign=top;fontSize=11;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="40" y="770" width="1080" height="40" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
