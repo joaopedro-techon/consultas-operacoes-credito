@@ -12,13 +12,16 @@ import java.time.Duration;
  * @param layouts diretório dos layouts de trancode ({@code <bloco>.yml} e {@code lista_operacoes.yml})
  * @param pool    pool de conexões do Apache HttpClient 5
  * @param fanOut  chamadas paralelas ao gateway em uma mesma requisição
+ * @param retry   condição de prazo do retry (tentativas e backoff ficam em
+ *                {@code resilience4j.retry.instances.fontePrimaria})
  */
 @ConfigurationProperties("consultas.fonte-primaria")
 public record FontePrimariaProperties(
         String url,
         @DefaultValue("classpath:trancode/layouts/") String layouts,
         @DefaultValue Pool pool,
-        @DefaultValue FanOut fanOut) {
+        @DefaultValue FanOut fanOut,
+        @DefaultValue Retry retry) {
 
     /**
      * @param maxConexoes          máximo de conexões abertas no total
@@ -49,6 +52,21 @@ public record FontePrimariaProperties(
             if (maxChamadasSimultaneas < 1) {
                 throw new IllegalArgumentException(
                         "consultas.fonte-primaria.fan-out.max-chamadas-simultaneas deve ser ao menos 1");
+            }
+        }
+    }
+
+    /**
+     * @param prazoMinimoRestante só tenta de novo se ainda restar pelo menos isto do prazo da requisição: cobre o
+     *                            backoff (até 30 ms com os valores padrão: 10 ms, ×2, jitter de 50%) e uma
+     *                            tentativa rápida
+     */
+    public record Retry(@DefaultValue("50ms") Duration prazoMinimoRestante) {
+
+        public Retry {
+            if (prazoMinimoRestante.isNegative()) {
+                throw new IllegalArgumentException(
+                        "consultas.fonte-primaria.retry.prazo-minimo-restante não pode ser negativo");
             }
         }
     }

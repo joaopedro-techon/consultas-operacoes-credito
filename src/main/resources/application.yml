@@ -97,7 +97,18 @@ consultas:
     # CLIENTE/CONTA: teto de chamadas simultâneas ao gateway (operação × bloco) por requisição
     fan-out:
       max-chamadas-simultaneas: ${CONSULTAS_FONTE_PRIMARIA_MAX_CHAMADAS_SIMULTANEAS:16}
+    # Só tenta de novo se restar pelo menos isto do prazo da requisição (backoff de até 30 ms + uma tentativa)
+    retry:
+      prazo-minimo-restante: 50ms
+  # Prazo da requisição por tipo de consulta (fail fast → 504), acima dos P99 alvo de 80 ms e 200 ms (ADR-0006)
+  prazo:
+    operacao: ${CONSULTAS_PRAZO_OPERACAO:150ms}
+    cliente: ${CONSULTAS_PRAZO_CLIENTE:400ms}
+    conta: ${CONSULTAS_PRAZO_CONTA:400ms}
 
+# Resiliência por dependência (Resilience4j). A fonte primária tem instâncias próprias ("fontePrimaria"),
+# isoladas da visão consolidada; a classificação das falhas (o que conta no circuito, o que é retentável) fica
+# no código (FalhasDoGateway), não aqui.
 resilience4j:
   circuitbreaker:
     instances:
@@ -109,3 +120,34 @@ resilience4j:
         failure-rate-threshold: 50
         wait-duration-in-open-state: 5s
         permitted-number-of-calls-in-half-open-state: 3
+      fontePrimaria:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 50
+        minimum-number-of-calls: 20
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 5
+        automatic-transition-from-open-to-half-open-enabled: false
+  bulkhead:
+    instances:
+      fontePrimaria:
+        # Igual ao pool de conexões: acima disso a chamada só esperaria conexão
+        max-concurrent-calls: 50
+        max-wait-duration: 10ms
+  ratelimiter:
+    instances:
+      fontePrimaria:
+        limit-for-period: 2000
+        limit-refresh-period: 1s
+        # Sem permissão: 503 na hora, sem fila
+        timeout-duration: 0s
+  retry:
+    instances:
+      fontePrimaria:
+        # 1 tentativa + 2 extras, backoff exponencial a partir de 10 ms (×2) com jitter de 50%
+        max-attempts: 3
+        wait-duration: 10ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        enable-randomized-wait: true
+        randomized-wait-factor: 0.5
