@@ -1,0 +1,193 @@
+{
+  "uid": "consultas-operacoes-credito",
+  "title": "Consultas de Operações de Crédito",
+  "tags": ["consultas-operacoes-credito"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "consumidor",
+        "label": "Consumidor",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(http_server_requests_seconds_count{uri=~\"/v1/operacoes-credito.*\"}, consumidor)", "refId": "consumidor" },
+        "definition": "label_values(http_server_requests_seconds_count{uri=~\"/v1/operacoes-credito.*\"}, consumidor)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2
+      },
+      {
+        "name": "tipo_consulta",
+        "label": "Tipo de consulta",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(http_server_requests_seconds_count{uri=~\"/v1/operacoes-credito.*\"}, tipo_consulta)", "refId": "tipo_consulta" },
+        "definition": "label_values(http_server_requests_seconds_count{uri=~\"/v1/operacoes-credito.*\"}, tipo_consulta)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Latência",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Latência P99 por tipo de consulta e rota",
+      "description": "Alvo: OPERACAO 80 ms, CLIENTE/CONTA 200 ms (prazo 150/400 ms).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, tipo_consulta, rota) (rate(http_server_requests_seconds_bucket{uri=~\"/v1/operacoes-credito.*\", consumidor=~\"$consumidor\", tipo_consulta=~\"$tipo_consulta\"}[$__rate_interval])))",
+          "legendFormat": "{{tipo_consulta}} / {{rota}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Latência P50 por tipo de consulta e rota",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le, tipo_consulta, rota) (rate(http_server_requests_seconds_bucket{uri=~\"/v1/operacoes-credito.*\", consumidor=~\"$consumidor\", tipo_consulta=~\"$tipo_consulta\"}[$__rate_interval])))",
+          "legendFormat": "{{tipo_consulta}} / {{rota}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Latência P99 por dependência",
+      "description": "DynamoDB, Valkey, fonte primária e SQS (consultas.dependencia).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, dependencia, operacao) (rate(consultas_dependencia_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "{{dependencia}} {{operacao}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "Erros",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "panels": []
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Requisições por status",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (status) (rate(http_server_requests_seconds_count{uri=~\"/v1/operacoes-credito.*\", consumidor=~\"$consumidor\", tipo_consulta=~\"$tipo_consulta\"}[$__rate_interval]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Taxa de erro (5xx) por tipo de consulta",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tipo_consulta) (rate(http_server_requests_seconds_count{uri=~\"/v1/operacoes-credito.*\", status=~\"5..\", consumidor=~\"$consumidor\", tipo_consulta=~\"$tipo_consulta\"}[$__rate_interval])) / sum by (tipo_consulta) (rate(http_server_requests_seconds_count{uri=~\"/v1/operacoes-credito.*\", consumidor=~\"$consumidor\", tipo_consulta=~\"$tipo_consulta\"}[$__rate_interval]))",
+          "legendFormat": "{{tipo_consulta}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Uso",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+      "panels": []
+    },
+    {
+      "id": 9,
+      "type": "bargauge",
+      "title": "Blocos mais pedidos",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 27 },
+      "options": { "orientation": "horizontal", "displayMode": "basic", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sort_desc(sum by (bloco) (increase(consultas_blocos_total{consumidor=~\"$consumidor\", tipo_consulta=~\"$tipo_consulta\"}[$__range])))",
+          "legendFormat": "{{bloco}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Consumo por consumidor",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 27 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (consumidor) (rate(http_server_requests_seconds_count{uri=~\"/v1/operacoes-credito.*\", consumidor=~\"$consumidor\", tipo_consulta=~\"$tipo_consulta\"}[$__rate_interval]))",
+          "legendFormat": "{{consumidor}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Blocos por consumidor",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 27 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (consumidor, bloco) (increase(consultas_blocos_total{consumidor=~\"$consumidor\", tipo_consulta=~\"$tipo_consulta\"}[$__range]))",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true }, "renameByName": { "Value": "solicitações" } } }
+      ]
+    }
+  ]
+}

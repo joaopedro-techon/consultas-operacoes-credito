@@ -1,0 +1,254 @@
+spring:
+  application:
+    name: consultas-operacoes-credito
+  config:
+    # Catálogo de campos por bloco (ADR-0005)
+    import: classpath:catalogo-campos.yml
+  threads:
+    virtual:
+      enabled: true
+  mvc:
+    problemdetails:
+      enabled: true
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  data:
+    # Valkey (protocolo Redis): cache por bloco da visão consolidada. Timeout curto: o cache é só otimização
+    # (fail-open), lento é tratado como indisponível e a consulta segue no DynamoDB. Valkey standalone ou
+    # replication group (cluster mode desligado); o código não usa comandos multi-slot além do MGET (ADR-0011).
+    redis:
+      host: ${CONSULTAS_VALKEY_HOST:localhost}
+      port: ${CONSULTAS_VALKEY_PORTA:6379}
+      timeout: ${CONSULTAS_VALKEY_TIMEOUT:10ms}
+      # Host inalcançável (pacotes descartados) custa no máximo isto por tentativa de conexão, até o circuito abrir
+      connect-timeout: ${CONSULTAS_VALKEY_CONNECT_TIMEOUT:20ms}
+      client-name: ${spring.application.name}
+      repositories:
+        enabled: false
+
+server:
+  shutdown: graceful
+
+logging:
+  structured:
+    format:
+      console: ecs
+    json:
+      customizer: br.com.consultas.operacoescredito.config.observabilidade.MascaramentoLogCustomizer
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  health:
+    # Valkey fora não tira a aplicação do ar (fail-open); o estado fica no circuit breaker
+    redis:
+      enabled: false
+  # Métricas e traces saem por OTLP (HTTP) para o OpenTelemetry Collector. O endpoint dos traces vem de
+  # OTEL_EXPORTER_OTLP_ENDPOINT (mapeado pelo Spring Boot); sem a variável, só as métricas tentam localhost.
+  opentelemetry:
+    resource-attributes:
+      deployment.environment.name: ${CONSULTAS_AMBIENTE:local}
+  otlp:
+    metrics:
+      export:
+        url: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/metrics
+        base-time-unit: seconds
+        step: 15s
+  tracing:
+    sampling:
+      # 100% na aplicação: quem decide o que guardar é o tail sampling do OpenTelemetry Collector
+      probability: 1.0
+  metrics:
+    distribution:
+      # Buckets nos prazos do requisito não funcional (P99 80/200 ms, 504 em 150/400 ms)
+      slo:
+        http.server.requests: 25ms,50ms,80ms,100ms,150ms,200ms,300ms,400ms,600ms,1s,2s
+        consultas.dependencia: 5ms,10ms,25ms,50ms,80ms,100ms,200ms,400ms,1s
+        consultas.etapa: 5ms,10ms,25ms,50ms,80ms,100ms,200ms,400ms,1s
+
+consultas:
+  dynamodb:
+    tabela: ${CONSULTAS_DYNAMODB_TABELA:operacoes-credito}
+    regiao: ${AWS_REGION:sa-east-1}
+    endpoint: ${CONSULTAS_DYNAMODB_ENDPOINT:}
+    # GSIs esparsos por cliente e por conta (ADR-0001)
+    indice-cliente: ${CONSULTAS_DYNAMODB_INDICE_CLIENTE:gsi-cliente}
+    indice-conta: ${CONSULTAS_DYNAMODB_INDICE_CONTA:gsi-conta}
+    # Teto de uma chamada ao SDK (todas as tentativas); numa requisição vale o menor entre ele e o prazo restante
+    timeout-chamada: 1s
+    # Teto de cada tentativa: uma tentativa presa ainda deixa prazo para o retry do SDK
+    timeout-tentativa: ${CONSULTAS_DYNAMODB_TIMEOUT_TENTATIVA:100ms}
+    # CLIENTE/CONTA: lotes de BatchGetItem (100 chaves) em andamento ao mesmo tempo por consulta
+    max-lotes-simultaneos: ${CONSULTAS_DYNAMODB_MAX_LOTES_SIMULTANEOS:4}
+    # Cliente HTTP do SDK (Apache HttpClient 5) com pool próprio. Comporta o pior caso dos bulkheads (validado na
+    # subida): (dynamodb − dynamodb-cliente-conta) + dynamodb-cliente-conta × max-lotes-simultaneos
+    # = (180 − 40) + 40 × 4 = 300. Sem conexão em timeout-obter-conexao: 503, sem contar no circuito
+    pool:
+      max-conexoes: ${CONSULTAS_DYNAMODB_MAX_CONEXOES:300}
+      timeout-conexao: 100ms
+      timeout-obter-conexao: 20ms
+      timeout-resposta: 1s
+      ttl: 5m
+      max-ociosa: 30s
+    # Única camada de retry do DynamoDB: a do SDK (modo standard: throttling, 5xx e falha de conexão)
+    retry:
+      tentativas-extras: 2
+      backoff-base: 10ms
+      backoff-maximo: 50ms
+  # Cache por operação e bloco no Valkey, só na visão consolidada (ADR-0002); conexão em spring.data.redis
+  cache:
+    habilitado: ${CONSULTAS_CACHE_HABILITADO:true}
+    ttl: ${CONSULTAS_CACHE_TTL:5m}
+    # Leituras e gravações em comandos de até 100 chaves, em pipeline (nenhum comando gigante no Valkey)
+    chaves-por-comando: 100
+    # Consultas com mais chaves (operações × blocos) vão direto ao DynamoDB, sem ler nem gravar no cache
+    max-chaves-por-consulta: ${CONSULTAS_CACHE_MAX_CHAVES_POR_CONSULTA:500}
+    # Sem ao menos isto do prazo da requisição, nem tenta o cache (maior que spring.data.redis.timeout)
+    prazo-minimo-restante: 20ms
+    # Gravações fora da requisição em andamento; acima disso a gravação é descartada
+    max-gravacoes-simultaneas: 32
+  # Fonte primária: gateway do mainframe (WireMock no ambiente local); sem cache (ADR-0002)
+  fonte-primaria:
+    url: ${CONSULTAS_FONTE_PRIMARIA_URL:http://localhost:8089}
+    layouts: classpath:trancode/layouts/
+    pool:
+      max-conexoes: 50
+      max-conexoes-por-rota: 50
+      ttl: 5m
+      keep-alive: 30s
+      # Bem abaixo do prazo da OPERACAO (150 ms): host inalcançável estoura este timeout (conta no circuito e é
+      # retentado), não o prazo. Conexão, pool e resposta são limitados ao que resta do prazo (ADR-0006/0009)
+      timeout-conexao: 50ms
+      timeout-obter-conexao: 50ms
+      timeout-resposta: 1s
+    # CLIENTE/CONTA: teto de chamadas simultâneas ao gateway (operação × bloco) por requisição
+    fan-out:
+      max-chamadas-simultaneas: ${CONSULTAS_FONTE_PRIMARIA_MAX_CHAMADAS_SIMULTANEAS:16}
+    # Só tenta de novo se restar pelo menos isto do prazo da requisição (backoff de até 30 ms + uma tentativa)
+    retry:
+      prazo-minimo-restante: 50ms
+  # Prazo da requisição por tipo de consulta (fail fast → 504), acima dos P99 alvo de 80 ms e 200 ms (ADR-0006)
+  prazo:
+    operacao: ${CONSULTAS_PRAZO_OPERACAO:150ms}
+    cliente: ${CONSULTAS_PRAZO_CLIENTE:400ms}
+    conta: ${CONSULTAS_PRAZO_CONTA:400ms}
+  # Evento de consumo no SQS, best-effort e assíncrono (ADR-0004); contrato em docs/eventos/evento-consumo.md
+  eventos:
+    habilitado: ${CONSULTAS_EVENTOS_HABILITADO:true}
+    # HMAC-SHA256 de CPF/CNPJ e conta; obrigatório com o evento ligado (vem de um cofre de segredos)
+    segredo-hmac: ${CONSULTAS_EVENTOS_SEGREDO_HMAC:}
+    fila:
+      capacidade: ${CONSULTAS_EVENTOS_CAPACIDADE_FILA:10000}
+      tamanho-lote: 10
+      intervalo-envio: 1s
+      tempo-maximo-drenagem: 10s
+    sqs:
+      url-fila: ${CONSULTAS_EVENTOS_SQS_URL_FILA:}
+      endpoint: ${CONSULTAS_EVENTOS_SQS_ENDPOINT:}
+      regiao: ${AWS_REGION:sa-east-1}
+      credenciais:
+        access-key-id: ${CONSULTAS_EVENTOS_SQS_CREDENCIAIS_ACCESS_KEY_ID:}
+        secret-access-key: ${CONSULTAS_EVENTOS_SQS_CREDENCIAIS_SECRET_ACCESS_KEY:}
+      # Retry só o do SDK (standard, 2 extras) dentro do timeout da chamada
+      timeout-tentativa: 1s
+      timeout-chamada: 3s
+
+# Resiliência por dependência (Resilience4j). A fonte primária tem instâncias próprias ("fontePrimaria"),
+# isoladas da visão consolidada ("dynamodb", "dynamodb-cliente-conta"); a classificação das falhas (o que conta
+# no circuito, o que é retentável) fica no código (FalhasDoGateway, ResilienciaDynamoDb), não aqui.
+# O DynamoDB não tem retry do Resilience4j: o retry é só o do SDK (consultas.dynamodb.retry).
+resilience4j:
+  circuitbreaker:
+    instances:
+      # Visão consolidada: conta cada Query/BatchGetItem depois do retry do SDK (throttling e UnprocessedKeys
+      # restantes incluídos); aberto → 503 sem chamar o DynamoDB. Não contam: chamadas interrompidas, timeouts
+      # encurtados pelo prazo da requisição, pool de conexões esgotado e 4xx que não são throttling (ADR-0010)
+      dynamodb:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 50
+        minimum-number-of-calls: 20
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 5
+        automatic-transition-from-open-to-half-open-enabled: false
+      # Cache por bloco (Valkey): aberto, a consulta vai direto ao DynamoDB sem tentar o Valkey
+      valkey:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 3
+      # Conta cada tentativa ao gateway; não contam timeouts encurtados pelo prazo da requisição, chamadas
+      # interrompidas pelo fan-out nem recusas do rate limiter/bulkhead (ADR-0009)
+      fontePrimaria:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 50
+        minimum-number-of-calls: 20
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+        # = consultas.fonte-primaria.fan-out.max-chamadas-simultaneas: as chamadas em andamento de um fan-out
+        # cabem como sondas do meio-aberto (e a recusa das seguintes não as interrompe, ADR-0009)
+        permitted-number-of-calls-in-half-open-state: 16
+        automatic-transition-from-open-to-half-open-enabled: false
+      # Evento de consumo: aberto, o lote é descartado sem chamar o SQS (a consulta nunca é afetada)
+      sqs:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 2
+  bulkhead:
+    instances:
+      # Consultas simultâneas na visão consolidada (todos os tipos); cheio → 503. Junto com o de CLIENTE/CONTA e
+      # consultas.dynamodb.max-lotes-simultaneos, define as conexões necessárias no pool (consultas.dynamodb.pool)
+      dynamodb:
+        max-concurrent-calls: 180
+        max-wait-duration: 0ms
+      # Teto próprio de CLIENTE/CONTA (mais caras), abaixo do total: sempre sobram 140 vagas para OPERACAO
+      dynamodb-cliente-conta:
+        max-concurrent-calls: 40
+        max-wait-duration: 0ms
+      fontePrimaria:
+        # Igual ao pool de conexões: acima disso a chamada só esperaria conexão
+        max-concurrent-calls: 50
+        max-wait-duration: 10ms
+      # Chamadas simultâneas das consultas CLIENTE/CONTA na fonte primária, abaixo do total (fontePrimaria): o
+      # fan-out delas (até 16 por consulta) nunca toma todas as vagas e sempre sobram 10 para OPERACAO
+      fontePrimaria-cliente-conta:
+        max-concurrent-calls: 40
+        max-wait-duration: 10ms
+      # Envios (SendMessageBatch) simultâneos; sem vaga em 1 s o lote é descartado. Enquanto o drenador espera,
+      # a fila em memória segura os eventos novos
+      sqs:
+        max-concurrent-calls: 4
+        max-wait-duration: 1s
+  ratelimiter:
+    instances:
+      # Consultas por segundo na visão consolidada; sem permissão → 503 na hora
+      dynamodb:
+        limit-for-period: 3000
+        limit-refresh-period: 1s
+        timeout-duration: 0s
+      fontePrimaria:
+        limit-for-period: 2000
+        limit-refresh-period: 1s
+        # Sem permissão: 503 na hora, sem fila
+        timeout-duration: 0s
+  retry:
+    instances:
+      fontePrimaria:
+        # 1 tentativa + 2 extras, backoff exponencial a partir de 10 ms (×2) com jitter de 50%
+        max-attempts: 3
+        wait-duration: 10ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        enable-randomized-wait: true
+        randomized-wait-factor: 0.5

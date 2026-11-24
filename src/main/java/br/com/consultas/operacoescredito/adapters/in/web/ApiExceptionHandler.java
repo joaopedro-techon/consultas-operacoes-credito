@@ -1,0 +1,83 @@
+package br.com.consultas.operacoescredito.adapters.in.web;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
+import br.com.consultas.operacoescredito.application.port.out.FalhaNaFonteDeOperacoesException;
+import br.com.consultas.operacoescredito.application.port.out.FonteDeOperacoesIndisponivelException;
+import br.com.consultas.operacoescredito.application.port.out.TempoEsgotadoNaFonteDeOperacoesException;
+import br.com.consultas.operacoescredito.domain.OperacaoNaoEncontradaException;
+import br.com.consultas.operacoescredito.domain.filtro.FiltroInvalidoException;
+import br.com.consultas.operacoescredito.domain.selecao.SelecaoDeCamposInvalidaException;
+
+/** Todos os erros em Problem Details (RFC 9457). */
+@RestControllerAdvice
+class ApiExceptionHandler extends ResponseEntityExceptionHandler {
+
+    private static final Logger LOG = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
+    @ExceptionHandler(OperacaoNaoEncontradaException.class)
+    ProblemDetail operacaoNaoEncontrada(OperacaoNaoEncontradaException e) {
+        return problema(HttpStatus.NOT_FOUND, "Operação de crédito não encontrada", e.getMessage());
+    }
+
+    @ExceptionHandler(RequisicaoInvalidaException.class)
+    ProblemDetail requisicaoInvalida(RequisicaoInvalidaException e) {
+        return problema(HttpStatus.BAD_REQUEST, "Requisição inválida", e.getMessage());
+    }
+
+    @ExceptionHandler(FiltroInvalidoException.class)
+    ProblemDetail filtroInvalido(FiltroInvalidoException e) {
+        return problema(HttpStatus.BAD_REQUEST, "Requisição inválida", e.getMessage());
+    }
+
+    @ExceptionHandler(SelecaoDeCamposInvalidaException.class)
+    ProblemDetail selecaoDeCamposInvalida(SelecaoDeCamposInvalidaException e) {
+        return problema(HttpStatus.BAD_REQUEST, "Requisição inválida", e.getMessage());
+    }
+
+    @ExceptionHandler(TempoEsgotadoNaFonteDeOperacoesException.class)
+    ProblemDetail tempoEsgotadoNaFonte(TempoEsgotadoNaFonteDeOperacoesException e) {
+        LOG.warn("Fonte de operações sem resposta no prazo: {}", e.getMessage(), e);
+        return problema(HttpStatus.GATEWAY_TIMEOUT, "Fonte de dados sem resposta no prazo",
+                "A fonte de dados não respondeu a tempo; reduza as operações com limite_operacoes, peça menos "
+                        + "blocos em expand ou consulte uma operação por vez (x-tipo-consulta: OPERACAO)");
+    }
+
+    /** Circuit breaker aberto, bulkhead cheio ou rate limiter interno: 503 com {@code Retry-After} em segundos. */
+    @ExceptionHandler(FonteDeOperacoesIndisponivelException.class)
+    ResponseEntity<ProblemDetail> fonteIndisponivel(FonteDeOperacoesIndisponivelException e) {
+        LOG.warn("Fonte de operações protegida, chamada recusada: {}", e.getMessage());
+        var segundos = Math.max(1, (e.tenteNovamenteEm().toMillis() + 999) / 1000);
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, Long.toString(segundos))
+                .body(problema(HttpStatus.SERVICE_UNAVAILABLE, "Fonte de dados temporariamente indisponível",
+                        "A fonte de dados está protegida contra sobrecarga ou falhas recentes; tente novamente "
+                                + "depois do tempo indicado em Retry-After"));
+    }
+
+    @ExceptionHandler(FalhaNaFonteDeOperacoesException.class)
+    ProblemDetail falhaNaFonte(FalhaNaFonteDeOperacoesException e) {
+        LOG.warn("Falha na fonte de operações: {}", e.getMessage(), e);
+        return problema(HttpStatus.BAD_GATEWAY, "Fonte de dados indisponível",
+                "A fonte de dados não respondeu de forma utilizável; tente novamente");
+    }
+
+    @ExceptionHandler(Exception.class)
+    ProblemDetail erroInesperado(Exception e) {
+        LOG.error("Erro inesperado na consulta", e);
+        return problema(HttpStatus.INTERNAL_SERVER_ERROR, "Erro interno", "Erro inesperado ao processar a consulta");
+    }
+
+    private static ProblemDetail problema(HttpStatus status, String titulo, String detalhe) {
+        var problema = ProblemDetail.forStatusAndDetail(status, detalhe);
+        problema.setTitle(titulo);
+        return problema;
+    }
+}
