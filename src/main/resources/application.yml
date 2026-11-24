@@ -78,6 +78,23 @@ consultas:
     # GSIs esparsos por cliente e por conta (ADR-0001)
     indice-cliente: ${CONSULTAS_DYNAMODB_INDICE_CLIENTE:gsi-cliente}
     indice-conta: ${CONSULTAS_DYNAMODB_INDICE_CONTA:gsi-conta}
+    # Teto de uma chamada ao SDK (todas as tentativas); numa requisição vale o menor entre ele e o prazo restante
+    timeout-chamada: 1s
+    # Teto de cada tentativa: uma tentativa presa ainda deixa prazo para o retry do SDK
+    timeout-tentativa: ${CONSULTAS_DYNAMODB_TIMEOUT_TENTATIVA:100ms}
+    # Cliente HTTP do SDK (Apache HttpClient 5) com pool próprio
+    pool:
+      max-conexoes: ${CONSULTAS_DYNAMODB_MAX_CONEXOES:100}
+      timeout-conexao: 100ms
+      timeout-obter-conexao: 20ms
+      timeout-resposta: 1s
+      ttl: 5m
+      max-ociosa: 30s
+    # Única camada de retry do DynamoDB: a do SDK (modo standard: throttling, 5xx e falha de conexão)
+    retry:
+      tentativas-extras: 2
+      backoff-base: 10ms
+      backoff-maximo: 50ms
   # Cache por operação e bloco no Valkey, só na visão consolidada (ADR-0002); conexão em spring.data.redis
   cache:
     habilitado: ${CONSULTAS_CACHE_HABILITADO:true}
@@ -107,11 +124,21 @@ consultas:
     conta: ${CONSULTAS_PRAZO_CONTA:400ms}
 
 # Resiliência por dependência (Resilience4j). A fonte primária tem instâncias próprias ("fontePrimaria"),
-# isoladas da visão consolidada; a classificação das falhas (o que conta no circuito, o que é retentável) fica
-# no código (FalhasDoGateway), não aqui.
+# isoladas da visão consolidada ("dynamodb", "dynamodb-cliente-conta"); a classificação das falhas (o que conta
+# no circuito, o que é retentável) fica no código (FalhasDoGateway, ResilienciaDynamoDb), não aqui.
+# O DynamoDB não tem retry do Resilience4j: o retry é só o do SDK (consultas.dynamodb.retry).
 resilience4j:
   circuitbreaker:
     instances:
+      # Visão consolidada: conta cada Query/BatchGetItem depois do retry do SDK; aberto → 503 sem chamar o DynamoDB
+      dynamodb:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 50
+        minimum-number-of-calls: 20
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 5
+        automatic-transition-from-open-to-half-open-enabled: false
       # Cache por bloco (Valkey): aberto, a consulta vai direto ao DynamoDB sem tentar o Valkey
       valkey:
         sliding-window-type: COUNT_BASED
@@ -130,12 +157,25 @@ resilience4j:
         automatic-transition-from-open-to-half-open-enabled: false
   bulkhead:
     instances:
+      # Consultas simultâneas na visão consolidada (todos os tipos); cheio → 503
+      dynamodb:
+        max-concurrent-calls: 200
+        max-wait-duration: 0ms
+      # Teto próprio de CLIENTE/CONTA (mais caras), abaixo do total: sempre sobra vaga para OPERACAO
+      dynamodb-cliente-conta:
+        max-concurrent-calls: 60
+        max-wait-duration: 0ms
       fontePrimaria:
         # Igual ao pool de conexões: acima disso a chamada só esperaria conexão
         max-concurrent-calls: 50
         max-wait-duration: 10ms
   ratelimiter:
     instances:
+      # Consultas por segundo na visão consolidada; sem permissão → 503 na hora
+      dynamodb:
+        limit-for-period: 3000
+        limit-refresh-period: 1s
+        timeout-duration: 0s
       fontePrimaria:
         limit-for-period: 2000
         limit-refresh-period: 1s

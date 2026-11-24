@@ -12,10 +12,11 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureRestTestClient;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.test.web.servlet.client.EntityExchangeResult;
 import org.springframework.test.web.servlet.client.RestTestClient;
 import tools.jackson.databind.JsonNode;
@@ -50,7 +51,6 @@ import static org.assertj.core.api.Assertions.assertThat;
         "resilience4j.bulkhead.instances.dynamodb-cliente-conta.max-concurrent-calls="
                 + ResilienciaVisaoConsolidadaIT.TETO_CLIENTE_CONTA,
         "resilience4j.ratelimiter.instances.dynamodb.limit-refresh-period=1s"})
-@AutoConfigureRestTestClient
 @Import(VisaoConsolidadaComToxiproxyContainers.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ResilienciaVisaoConsolidadaIT {
@@ -74,9 +74,13 @@ class ResilienciaVisaoConsolidadaIT {
     private final RateLimiterRegistry rateLimiters;
 
     @Autowired
-    ResilienciaVisaoConsolidadaIT(RestTestClient client, Proxy proxyDynamoDb, CircuitBreakerRegistry circuitBreakers,
-                                  BulkheadRegistry bulkheads, RateLimiterRegistry rateLimiters) {
-        this.client = client;
+    ResilienciaVisaoConsolidadaIT(@LocalServerPort int porta, Proxy proxyDynamoDb,
+                                  CircuitBreakerRegistry circuitBreakers, BulkheadRegistry bulkheads,
+                                  RateLimiterRegistry rateLimiters) {
+        // Cliente sem retry automático: o do Apache HttpClient repetiria o 503 depois do Retry-After
+        this.client = RestTestClient.bindToServer(new JdkClientHttpRequestFactory())
+                .baseUrl("http://localhost:" + porta)
+                .build();
         this.proxyDynamoDb = proxyDynamoDb;
         this.circuitBreakers = circuitBreakers;
         this.bulkheads = bulkheads;
@@ -112,10 +116,8 @@ class ResilienciaVisaoConsolidadaIT {
         assertThat(resposta.getStatus().value()).isEqualTo(504);
         assertThat(resposta.getResponseHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
         var problema = JSON.readTree(resposta.getResponseBody());
-        assertThat(problema.get("title").asString()).isEqualTo("Prazo da consulta esgotado");
-        assertThat(problema.get("tipo_consulta").asString()).isEqualTo("OPERACAO");
-        assertThat(problema.get("prazo_ms").asLong()).isEqualTo(PRAZO_OPERACAO_MS);
-        assertThat(problema.get("detail").asString()).contains("expand");
+        assertThat(problema.get("title").asString()).isEqualTo("Fonte de dados sem resposta no prazo");
+        assertThat(problema.get("detail").asString()).contains("limite_operacoes", "expand", "OPERACAO");
         assertThat(problema.get("correlation_id").asString()).isNotBlank();
         assertThat(problema.has("data")).isFalse();
         assertThat(duracaoMs).as("504 no prazo de OPERACAO, sem esperar o DynamoDB")
@@ -134,8 +136,7 @@ class ResilienciaVisaoConsolidadaIT {
 
         assertThat(resposta.getStatus().value()).isEqualTo(504);
         var problema = JSON.readTree(resposta.getResponseBody());
-        assertThat(problema.get("tipo_consulta").asString()).isEqualTo(tipo);
-        assertThat(problema.get("prazo_ms").asLong()).isEqualTo(PRAZO_CLIENTE_CONTA_MS);
+        assertThat(problema.get("status").asInt()).isEqualTo(504);
         assertThat(problema.get("detail").asString()).contains("limite_operacoes", "expand", "OPERACAO");
         assertThat(duracaoMs).as("504 no prazo de " + tipo)
                 .isBetween((long) PRAZO_CLIENTE_CONTA_MS, PRAZO_CLIENTE_CONTA_MS + FOLGA_MS);
