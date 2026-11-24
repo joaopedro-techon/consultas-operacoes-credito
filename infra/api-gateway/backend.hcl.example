@@ -1,0 +1,8 @@
+# Copie para backend.hcl (git-ignored) e use: terraform init -backend-config=backend.hcl
+bucket       = "<bucket-de-state-terraform>"
+region       = "sa-east-1"
+encrypt      = true
+use_lockfile = true # lock nativo no S3 (Terraform >= 1.10), sem tabela DynamoDB
+
+# Chave própria deste módulo; não compartilhe com o infra/ecs nem com o repositório do mainframe.
+key = "consultas-operacoes-credito/api-gateway/terraform.tfstate"
