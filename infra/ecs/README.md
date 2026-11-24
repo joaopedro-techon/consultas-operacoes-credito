@@ -25,15 +25,27 @@ Pontos de projeto:
 
 Se este módulo já foi aplicado com os dois serviços, o state ainda tem os recursos `["fonte-primaria"]`, e um `apply` desta versão os **destruiria**. Antes do primeiro `plan`, tire-os deste state (ou mova-os para o state do repositório do mainframe com `terraform state mv -state-out=...`), seguindo o runbook de cutover do repositório do mainframe:
 
+Primeiro, liste o que o state tem do serviço:
+
 ```powershell
-foreach ($r in 'aws_cloudwatch_log_group.this', 'aws_ecs_task_definition.this', 'aws_lb_target_group.this',
-               'aws_lb_listener_rule.this', 'aws_ecs_service.this', 'aws_appautoscaling_target.this',
-               'aws_appautoscaling_policy.requisicoes') {
-  terraform state rm "$r[\`"fonte-primaria\`"]"
-}
+terraform state list | Select-String 'fonte-primaria'
 ```
 
-O `plan` seguinte não pode ter nenhum `destroy`.
+Em seguida, remova cada endereço listado, um por linha. O `--%` passa o resto da linha ao `terraform` sem que o PowerShell 5.1 tire as aspas internas; sem ele, o `terraform` recusa o endereço.
+
+```powershell
+terraform --% state rm aws_cloudwatch_log_group.this[\"fonte-primaria\"]
+terraform --% state rm aws_ecs_task_definition.this[\"fonte-primaria\"]
+terraform --% state rm aws_lb_target_group.this[\"fonte-primaria\"]
+terraform --% state rm aws_lb_listener_rule.this[\"fonte-primaria\"]
+terraform --% state rm aws_ecs_service.this[\"fonte-primaria\"]
+terraform --% state rm aws_appautoscaling_target.this[\"fonte-primaria\"]
+terraform --% state rm aws_appautoscaling_policy.requisicoes[\"fonte-primaria\"]
+# só se o serviço tinha alvo_cpu (a política de CPU é opcional)
+terraform --% state rm aws_appautoscaling_policy.cpu[\"fonte-primaria\"]
+```
+
+Depois disso, `terraform state list | Select-String 'fonte-primaria'` não pode listar nada, e o `plan` seguinte não pode ter nenhum `destroy`.
 
 ## Fora do escopo (pré-requisitos)
 
