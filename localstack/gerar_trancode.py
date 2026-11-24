@@ -6,10 +6,17 @@ Requer PyYAML. Cada localstack/massa/<id_operacao>/<BLOCO>.json é codificado co
 src/main/resources/trancode/layouts/<bloco>.yml, o mesmo que a API usa para ler o trancode. Assim a fonte
 primária e a visão consolidada devolvem o mesmo JSON para a mesma operação.
 
-Saída: wiremock/mappings/<id_operacao>.json, um stub por bloco existente:
+Saída:
+- wiremock/mappings/<id_operacao>.json, um stub por bloco existente:
     GET /mainframe/operacoes/<id_operacao>/blocos/<bloco>  ->  200 text/plain com o trancode
-Bloco ausente na massa não tem stub (o WireMock responde 404: bloco indisponível); operação inexistente
-também responde 404.
+  Bloco ausente na massa não tem stub (o WireMock responde 404: bloco indisponível); operação inexistente
+  também responde 404.
+- wiremock/mappings/clientes.json e contas.json, um stub por cliente e por conta da massa (indices.env):
+    GET /mainframe/clientes/<cpf_cnpj>/operacoes  ->  200 text/plain com a lista de operações
+    GET /mainframe/contas/<conta>/operacoes       ->  idem
+  A lista usa o layout lista_operacoes.yml (id_operacao + data_contratacao_operacao), da mais recente para a
+  mais antiga por data de contratação e, no empate, por id_operacao (mesma ordem do sk_gsi da visão
+  consolidada). Cliente ou conta sem operações não tem stub (404: a API devolve lista vazia).
 
 Regras de codificação (inversas das do parser da API):
 - registro: campos de posição fixa (inicio a partir de 1, relativo ao registro), seguidos das listas
@@ -93,9 +100,18 @@ def codificar_bloco(layout, conteudo):
     return codificar_registro(layout["registro"], conteudo)
 
 
+LAYOUT_LISTA_OPERACOES = "lista_operacoes"
+# Atributo do indices.env -> rota da lista no gateway
+LISTAS = {"CPF_CNPJ_CLIENTE": ("clientes", "clientes"), "CONTA_CLIENTE": ("contas", "contas")}
+
+
 def stub(id_operacao, bloco, trancode):
+    return stub_url(f"/mainframe/operacoes/{id_operacao}/blocos/{bloco}", trancode)
+
+
+def stub_url(url, trancode):
     return {
-        "request": {"method": "GET", "url": f"/mainframe/operacoes/{id_operacao}/blocos/{bloco}"},
+        "request": {"method": "GET", "url": url},
         "response": {
             "status": 200,
             "headers": {"Content-Type": "text/plain; charset=utf-8"},
@@ -109,20 +125,54 @@ def carregar_layouts():
             for arquivo in sorted(LAYOUTS.glob("*.yml"))}
 
 
+def ler_indices(diretorio):
+    indices = {}
+    for linha in diretorio.joinpath("indices.env").read_text(encoding="utf-8").splitlines():
+        if "=" in linha:
+            chave, valor = linha.split("=", 1)
+            indices[chave.strip()] = valor.strip()
+    return indices
+
+
+def gravar(nome, stubs):
+    MAPPINGS.joinpath(f"{nome}.json").write_text(
+        json.dumps({"mappings": stubs}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+
+def stubs_das_listas(layout, operacoes):
+    """Um stub de lista por cliente e por conta; operacoes: (id_operacao, data_contratacao, indices)."""
+    for atributo, (rota, arquivo) in LISTAS.items():
+        por_chave = {}
+        for id_operacao, data_contratacao, indices in operacoes:
+            if indices.get(atributo):
+                por_chave.setdefault(indices[atributo], []).append(
+                    {"id_operacao": id_operacao, "data_contratacao_operacao": data_contratacao})
+        stubs = []
+        for chave, itens in sorted(por_chave.items()):
+            itens.sort(key=lambda item: (item["data_contratacao_operacao"], item["id_operacao"]), reverse=True)
+            stubs.append(stub_url(f"/mainframe/{rota}/{chave}/operacoes", codificar_bloco(layout, itens)))
+        gravar(arquivo, stubs)
+        print(f"{arquivo}: {len(stubs)} listas de operações")
+
+
 def main():
     layouts = carregar_layouts()
     if MAPPINGS.exists():
         shutil.rmtree(MAPPINGS)
     MAPPINGS.mkdir(parents=True)
+    operacoes = []
     for diretorio in sorted(p for p in MASSA.iterdir() if p.is_dir() and re.fullmatch(r"\d+", p.name)):
         stubs = []
         for arquivo in sorted(diretorio.glob("*.json")):
             bloco = arquivo.stem.lower()
             conteudo = json.loads(arquivo.read_text(encoding="utf-8"), parse_float=Decimal)
             stubs.append(stub(diretorio.name, bloco, codificar_bloco(layouts[bloco], conteudo)))
-        MAPPINGS.joinpath(f"{diretorio.name}.json").write_text(
-            json.dumps({"mappings": stubs}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+            if bloco == "operacao":
+                operacoes.append((conteudo["id_operacao"], conteudo["data_contratacao_operacao"],
+                                  ler_indices(diretorio)))
+        gravar(diretorio.name, stubs)
         print(f"{diretorio.name}: {len(stubs)} stubs de trancode")
+    stubs_das_listas(layouts[LAYOUT_LISTA_OPERACOES], operacoes)
 
 
 if __name__ == "__main__":

@@ -140,15 +140,6 @@ class FontePrimariaIT {
     }
 
     @Test
-    void consultaPorClienteNaFontePrimariaAindaNaoEstaDisponivel() {
-        client.get().uri(ROTA_FONTE_PRIMARIA + "?cpf_cnpj=52998224725")
-                .header("x-tipo-consulta", "CLIENTE")
-                .exchange()
-                .expectStatus().isEqualTo(501)
-                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON);
-    }
-
-    @Test
     void correlationIdERepassadoAoGatewayEmCadaChamadaDeBloco() {
         var correlationId = "fp-correlation-" + UUID.randomUUID();
         client.get().uri(ROTA_FONTE_PRIMARIA + "?id_operacao=100000002&expand=parcelas")

@@ -1,0 +1,9 @@
+# Layout do trancode da lista de operações de um cliente ou conta (formato descrito em README.md,
+# "Fonte primária"): GET /mainframe/clientes/{cpf_cnpj}/operacoes e GET /mainframe/contas/{conta}/operacoes.
+# Prefixo de 3 dígitos com a quantidade + um registro por operação, mais recente primeiro.
+bloco: lista_operacoes
+estrutura: lista
+registro:
+  campos:
+    - { campo: id_operacao, inicio: 1, tamanho: 18, tipo: numero }
+    - { campo: data_contratacao_operacao, inicio: 19, tamanho: 10, tipo: data, formato: yyyy-MM-dd }

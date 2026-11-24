@@ -79,14 +79,78 @@ class LayoutsTrancodeTest {
                 .hasMessageContaining("declara bloco 'componentes'");
     }
 
+    @Test
+    void layoutDaListaDeOperacoesTemIdEDataDeContratacao() {
+        var lista = LayoutsTrancode.carregar(new DefaultResourceLoader(), "classpath:trancode/layouts/")
+                .listaOperacoes();
+
+        assertThat(lista.estrutura()).isEqualTo(LayoutTrancode.Estrutura.LISTA);
+        assertThat(lista.registro().campos()).extracting(LayoutTrancode.Campo::campo)
+                .containsExactly("id_operacao", "data_contratacao_operacao");
+    }
+
+    @Test
+    void layoutDaListaDeOperacoesAusenteImpedeACarga() throws IOException {
+        copiarLayoutsExceto(LayoutsTrancode.LISTA_OPERACOES);
+
+        assertThatThrownBy(this::carregar)
+                .isInstanceOf(LayoutsTrancode.LayoutTrancodeInvalidoException.class)
+                .hasMessageContaining("lista_operacoes.yml");
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @CsvSource(delimiter = '|', quoteCharacter = '"', textBlock = """
+            objeto em vez de lista | objeto | { campo: id_operacao, inicio: 1, tamanho: 18, tipo: numero }              | estrutura lista
+            id como texto          | lista  | { campo: id_operacao, inicio: 1, tamanho: 18, tipo: texto }               | id_operacao do tipo numero
+            sem id                 | lista  | { campo: numero, inicio: 1, tamanho: 18, tipo: numero }                   | id_operacao do tipo numero
+            """)
+    void layoutDaListaDeOperacoesInconsistenteImpedeACarga(String caso, String estrutura, String campoId, String motivo)
+            throws IOException {
+        copiarLayoutsExceto(LayoutsTrancode.LISTA_OPERACOES);
+        Files.writeString(diretorio.resolve("lista_operacoes.yml"), """
+                bloco: lista_operacoes
+                estrutura: %s
+                registro:
+                  campos:
+                    - %s
+                    - { campo: data_contratacao_operacao, inicio: 19, tamanho: 10, tipo: data, formato: yyyy-MM-dd }
+                """.formatted(estrutura, campoId));
+
+        assertThatThrownBy(this::carregar)
+                .isInstanceOf(LayoutsTrancode.LayoutTrancodeInvalidoException.class)
+                .hasMessageContaining("lista_operacoes")
+                .hasMessageContaining(motivo);
+    }
+
+    @Test
+    void layoutDaListaDeOperacoesSemDataDeContratacaoImpedeACarga() throws IOException {
+        copiarLayoutsExceto(LayoutsTrancode.LISTA_OPERACOES);
+        Files.writeString(diretorio.resolve("lista_operacoes.yml"), """
+                bloco: lista_operacoes
+                estrutura: lista
+                registro:
+                  campos:
+                    - { campo: id_operacao, inicio: 1, tamanho: 18, tipo: numero }
+                """);
+
+        assertThatThrownBy(this::carregar)
+                .isInstanceOf(LayoutsTrancode.LayoutTrancodeInvalidoException.class)
+                .hasMessageContaining("data_contratacao_operacao do tipo data");
+    }
+
     private LayoutsTrancode carregar() {
         return LayoutsTrancode.carregar(new DefaultResourceLoader(), diretorio.toUri().toString());
     }
 
     private void copiarLayoutsExceto(String excluido) throws IOException {
+        var nomes = new java.util.ArrayList<String>();
         for (var bloco : Bloco.values()) {
-            if (!bloco.nome().equals(excluido)) {
-                Files.copy(Path.of(ORIGEM, bloco.nome() + ".yml"), diretorio.resolve(bloco.nome() + ".yml"));
+            nomes.add(bloco.nome());
+        }
+        nomes.add(LayoutsTrancode.LISTA_OPERACOES);
+        for (var nome : nomes) {
+            if (!nome.equals(excluido)) {
+                Files.copy(Path.of(ORIGEM, nome + ".yml"), diretorio.resolve(nome + ".yml"));
             }
         }
     }

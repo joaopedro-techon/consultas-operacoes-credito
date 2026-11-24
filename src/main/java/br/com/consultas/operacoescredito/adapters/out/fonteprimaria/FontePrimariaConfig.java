@@ -73,6 +73,6 @@ class FontePrimariaConfig {
                 .build()
                 .createClient(GatewayMainframeClient.class);
         return new FontePrimariaTrancodeAdapter(gateway, LayoutsTrancode.carregar(resourceLoader, properties.layouts()),
-                observationRegistry);
+                observationRegistry, properties.fanOut().maxChamadasSimultaneas());
     }
 }
