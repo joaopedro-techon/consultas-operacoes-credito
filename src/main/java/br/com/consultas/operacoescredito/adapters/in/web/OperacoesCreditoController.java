@@ -1,7 +1,9 @@
 package br.com.consultas.operacoescredito.adapters.in.web;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -22,15 +24,25 @@ class OperacoesCreditoController {
 
     static final String HEADER_BLOCOS_INDISPONIVEIS = "x-blocos-indisponiveis";
 
-    private final ConsultarOperacoesUseCase consultarOperacoes;
+    /** Segmento da rota da fonte primária; sem ele, a consulta vai à visão consolidada. */
+    static final String FONTE_PRIMARIA = "fonte-primaria";
 
-    OperacoesCreditoController(ConsultarOperacoesUseCase consultarOperacoes) {
-        this.consultarOperacoes = consultarOperacoes;
+    private final ConsultarOperacoesUseCase visaoConsolidada;
+    private final ConsultarOperacoesUseCase fontePrimaria;
+
+    OperacoesCreditoController(ConsultarOperacoesUseCase visaoConsolidada,
+                               @Qualifier("fontePrimaria") ConsultarOperacoesUseCase fontePrimaria) {
+        this.visaoConsolidada = visaoConsolidada;
+        this.fontePrimaria = fontePrimaria;
     }
 
-    /** Consulta na visão consolidada. */
-    @GetMapping
+    /**
+     * Consulta na visão consolidada ({@code /v1/operacoes-credito}) ou na fonte primária
+     * ({@code /v1/operacoes-credito/fonte-primaria}): mesmo contrato, mesmo caso de uso, outra fonte.
+     */
+    @GetMapping({"", "/{rota:" + FONTE_PRIMARIA + "}"})
     ResponseEntity<ConsultaResponse> consultar(
+            @PathVariable(name = "rota", required = false) String rota,
             @RequestHeader(name = ParametrosConsulta.HEADER_TIPO_CONSULTA, required = false) String tipoConsulta,
             @RequestParam(name = ParametrosConsulta.ID_OPERACAO, required = false) String idOperacao,
             @RequestParam(name = ParametrosConsulta.CPF_CNPJ, required = false) String cpfCnpj,
@@ -39,6 +51,7 @@ class OperacoesCreditoController {
             @RequestParam(name = ParametrosConsulta.EXPAND, required = false) String expand,
             @RequestParam(name = ParametrosConsulta.FIELDS, required = false) String fields) {
         var parametros = new ParametrosConsulta(tipoConsulta, idOperacao, cpfCnpj, conta, limiteOperacoes, expand, fields);
+        var consultarOperacoes = rota == null ? visaoConsolidada : fontePrimaria;
         var operacoes = consultarOperacoes.consultar(
                 new Consulta(parametros.criterio(), parametros.blocos(), parametros.campos()));
         var resposta = ResponseEntity.ok();

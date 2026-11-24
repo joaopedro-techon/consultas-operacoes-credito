@@ -7,6 +7,8 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
+import br.com.consultas.operacoescredito.application.port.out.FalhaNaFonteDeOperacoesException;
+import br.com.consultas.operacoescredito.application.port.out.TipoConsultaNaoSuportadoException;
 import br.com.consultas.operacoescredito.domain.OperacaoNaoEncontradaException;
 import br.com.consultas.operacoescredito.domain.selecao.SelecaoDeCamposInvalidaException;
 
@@ -29,6 +31,18 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(SelecaoDeCamposInvalidaException.class)
     ProblemDetail selecaoDeCamposInvalida(SelecaoDeCamposInvalidaException e) {
         return problema(HttpStatus.BAD_REQUEST, "Requisição inválida", e.getMessage());
+    }
+
+    @ExceptionHandler(TipoConsultaNaoSuportadoException.class)
+    ProblemDetail tipoNaoSuportadoNaFonte(TipoConsultaNaoSuportadoException e) {
+        return problema(HttpStatus.NOT_IMPLEMENTED, "Tipo de consulta não disponível", e.getMessage());
+    }
+
+    @ExceptionHandler(FalhaNaFonteDeOperacoesException.class)
+    ProblemDetail falhaNaFonte(FalhaNaFonteDeOperacoesException e) {
+        LOG.warn("Falha na fonte de operações: {}", e.getMessage(), e);
+        return problema(HttpStatus.BAD_GATEWAY, "Fonte de dados indisponível",
+                "A fonte de dados não respondeu de forma utilizável; tente novamente");
     }
 
     @ExceptionHandler(Exception.class)
