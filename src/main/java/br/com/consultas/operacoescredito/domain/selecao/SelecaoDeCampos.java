@@ -41,11 +41,6 @@ public final class SelecaoDeCampos {
         this.porBloco = porBloco;
     }
 
-    /** Seleção vazia: todos os blocos voltam completos. */
-    public static SelecaoDeCampos nenhuma() {
-        return NENHUMA;
-    }
-
     /**
      * Valida e monta a seleção.
      *

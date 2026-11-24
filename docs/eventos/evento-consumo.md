@@ -28,12 +28,12 @@ exata.
 | `timestamp` | texto ISO-8601 UTC | sim | Início da requisição (ex.: `2026-11-23T10:15:30.123Z`) |
 | `correlation_id` | texto | sim | `x-correlationid` recebido ou gerado (o mesmo devolvido na resposta) |
 | `trace_id` | texto (32 hex) | não | Trace W3C da requisição |
-| `consumidor` | texto | sim | `x-consumidor` como veio (id da API key no API Gateway) ou `desconhecido` |
+| `consumidor` | texto | sim | `x-consumidor` (id da API key no API Gateway) sem espaços nas pontas; `desconhecido` se ausente; `invalido` se fora de `[A-Za-z0-9._-]{1,64}` (o mesmo valor de logs e métricas) |
 | `rota` | texto | sim | `visao_consolidada` ou `fonte_primaria` |
 | `tipo_consulta` | texto | não | `OPERACAO`, `CLIENTE`, `CONTA` ou `invalido`; fora se o header não veio |
 | `id_operacao` | inteiro | não | `id_operacao` informado, se numérico |
-| `cpf_cnpj_hmac` | texto (64 hex) | não | HMAC-SHA256 do `cpf_cnpj` informado, como veio |
-| `conta_hmac` | texto (64 hex) | não | HMAC-SHA256 da `conta` informada, como veio |
+| `cpf_cnpj_hmac` | texto (64 hex) | não | HMAC-SHA256 do `cpf_cnpj` informado, sem `.`, `-` e `/` quando o resto é um CPF/CNPJ válido (ver abaixo) |
+| `conta_hmac` | texto (64 hex) | não | HMAC-SHA256 da `conta` informada, sem `.`, `-` e `/` quando o resto é só dígitos |
 | `blocos_solicitados` | lista de texto | sim | `operacao`, `originacao` e os blocos do `expand`, só nomes válidos, na ordem pedida |
 | `campos_solicitados` | lista de texto | sim | Itens do `fields` bem formados (`bloco.campo`, `bloco.campo.subcampo`) |
 | `filtro` | texto | não | `filter` com CPF/CNPJ e conta trocados pelo HMAC (ver abaixo) |
@@ -63,12 +63,18 @@ exata.
 CPF/CNPJ e conta **nunca** vão em claro: só como HMAC-SHA256 em hex minúsculo com o segredo da aplicação
 (`consultas.eventos.segredo-hmac`). O mesmo valor dá sempre o mesmo HMAC enquanto o segredo não mudar, o que
 permite contar e cruzar consumo por cliente ou conta sem guardar o dado. Trocar o segredo quebra essa
-correspondência com eventos antigos (não muda o schema).
+correspondência com eventos antigos (não muda o schema). O segredo tem pelo menos 32 bytes; mais curto, a
+aplicação não sobe.
 
-No `filtro`, o argumento de toda comparação cujo seletor termina em `cpf_cnpj`, `cpf`, `cnpj` ou `conta` vira o
-HMAC (cada item de `=in=`/`=out=`, sem as aspas), e qualquer CPF/CNPJ solto com DV válido também. Ex.:
-`operacao.cpf_cnpj==52998224725;operacao.situacao_operacao_credito==ATIVA` →
-`operacao.cpf_cnpj==<hmac>;operacao.situacao_operacao_credito==ATIVA`.
+Antes do HMAC, a pontuação de CPF/CNPJ e conta (`.`, `-`, `/`) é removida quando o que sobra é um CPF/CNPJ com DV
+válido ou só dígitos: `529.982.247-25` e `52998224725` dão o mesmo HMAC, então o HMAC do `filtro` casa com o
+`cpf_cnpj_hmac`.
+
+No `filtro`, o argumento de toda comparação cujo seletor termina em `cpf_cnpj`, `cpf`, `cnpj` ou `conta`
+(maiúsculas ou minúsculas) vira o HMAC (cada item de `=in=`/`=out=`, sem as aspas), e qualquer CPF/CNPJ solto
+com DV válido, com ou sem pontuação, também. Ex.:
+`operacao.cpf_cnpj==529.982.247-25;operacao.situacao_operacao_credito==ATIVA` →
+`operacao.cpf_cnpj==<hmac de 52998224725>;operacao.situacao_operacao_credito==ATIVA`.
 
 Blocos e campos malformados (que poderiam ser um dado pessoal digitado no lugar errado) ficam fora de
 `blocos_solicitados` e `campos_solicitados`.

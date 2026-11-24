@@ -24,7 +24,6 @@ import java.util.stream.Collectors;
 class BlocosSolicitadosObservationHandler implements ObservationHandler<ServerRequestObservationContext> {
 
     static final String METRICA = "consultas.blocos";
-    private static final String PREFIXO_CONSULTA = "/v1/operacoes-credito";
     private static final Set<String> TAGS_DA_REQUISICAO = Set.of(ConsultaObservationConvention.CONSUMIDOR,
             ConsultaObservationConvention.TIPO_CONSULTA, ConsultaObservationConvention.ROTA, "status");
     private static final Set<String> CATALOGO = Arrays.stream(Bloco.values())
@@ -45,7 +44,7 @@ class BlocosSolicitadosObservationHandler implements ObservationHandler<ServerRe
     @Override
     public void onStop(ServerRequestObservationContext context) {
         var request = context.getCarrier();
-        if (!request.getRequestURI().startsWith(request.getContextPath() + PREFIXO_CONSULTA)) {
+        if (!RequisicaoDeConsulta.ehRotaDeConsulta(request)) {
             return;
         }
         var registry = meterRegistry.getIfAvailable();
@@ -55,7 +54,7 @@ class BlocosSolicitadosObservationHandler implements ObservationHandler<ServerRe
         var tags = context.getLowCardinalityKeyValues().stream()
                 .filter(keyValue -> TAGS_DA_REQUISICAO.contains(keyValue.getKey()))
                 .toList();
-        ContextoRequisicaoFilter.blocos(request).stream()
+        RequisicaoDeConsulta.blocos(request).stream()
                 .filter(CATALOGO::contains)
                 .forEach(bloco -> {
                     var contador = Counter.builder(METRICA)

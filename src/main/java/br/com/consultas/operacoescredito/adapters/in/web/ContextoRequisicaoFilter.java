@@ -1,7 +1,6 @@
 package br.com.consultas.operacoescredito.adapters.in.web;
 
 import br.com.consultas.operacoescredito.config.observabilidade.CacheDaRequisicao;
-import br.com.consultas.operacoescredito.domain.TipoConsulta;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -18,19 +17,16 @@ import org.springframework.web.servlet.HandlerExceptionResolver;
 
 import java.io.IOException;
 import java.time.Instant;
-import java.util.Arrays;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 /**
  * Resolve o contexto da requisição antes de qualquer processamento: {@code x-correlationid}
- * (validado ou gerado), {@code x-consumidor}, tipo de consulta e rota vão para o MDC, o
- * correlationId volta no header da resposta e, ao final, sai um log de acesso, o evento de consumo das rotas de
- * consulta ({@link RegistroDeConsumoHttp}, com os hits e misses de cache da requisição) e o MDC é limpo.
+ * (validado ou gerado), {@code x-consumidor} (normalizado por {@link RequisicaoDeConsulta}), tipo de consulta e
+ * rota vão para o MDC, o correlationId volta no header da resposta e, ao final, sai um log de acesso (com os hits e
+ * misses de cache por bloco), o evento de consumo das rotas de consulta ({@link RegistroDeConsumoHttp}) e as
+ * chaves que este filtro pôs no MDC são removidas (as demais, como {@code traceId}/{@code spanId}, são de quem as pôs).
  * Roda logo depois do {@code ServerHttpObservationFilter} (ordem {@code HIGHEST_PRECEDENCE + 1}),
  * para que até a rejeição de um {@code x-correlationid} inválido seja medida e tenha span, e o log
  * de acesso saia com o {@code trace_id}.
@@ -40,7 +36,6 @@ import java.util.stream.Collectors;
 class ContextoRequisicaoFilter extends OncePerRequestFilter {
 
     static final String HEADER_CORRELATION_ID = "x-correlationid";
-    static final String HEADER_CONSUMIDOR = "x-consumidor";
     static final String MDC_CORRELATION_ID = "correlation_id";
     static final String MDC_CONSUMIDOR = "consumidor";
     static final String MDC_TIPO_CONSULTA = "tipo_consulta";
@@ -48,12 +43,11 @@ class ContextoRequisicaoFilter extends OncePerRequestFilter {
 
     private static final Logger ACESSO = LoggerFactory.getLogger("acesso");
     private static final Pattern CORRELATION_ID_VALIDO = Pattern.compile("[A-Za-z0-9-]{1,64}");
-    private static final String CONSUMIDOR_DESCONHECIDO = "desconhecido";
-    private static final String TIPO_INVALIDO = "invalido";
-    private static final List<String> BLOCOS_SEMPRE = List.of("operacao", "originacao");
-    private static final Set<String> TIPOS_VALIDOS = Arrays.stream(TipoConsulta.values())
-            .map(Enum::name)
-            .collect(Collectors.toUnmodifiableSet());
+    private static final List<String> CHAVES_DO_MDC = List.of(MDC_CORRELATION_ID, MDC_CONSUMIDOR, MDC_TIPO_CONSULTA,
+            MDC_ROTA);
+    private static final List<String> PARAMETROS_NO_LOG = List.of(ParametrosConsulta.ID_OPERACAO,
+            ParametrosConsulta.CPF_CNPJ, ParametrosConsulta.CONTA, ParametrosConsulta.LIMITE_OPERACOES,
+            ParametrosConsulta.FIELDS, ParametrosConsulta.FILTER);
 
     private final HandlerExceptionResolver resolvedorDeErros;
     private final RegistroDeConsumoHttp registroDeConsumo;
@@ -82,9 +76,9 @@ class ContextoRequisicaoFilter extends OncePerRequestFilter {
                 : UUID.randomUUID().toString();
         try {
             MDC.put(MDC_CORRELATION_ID, correlationId);
-            MDC.put(MDC_CONSUMIDOR, consumidor(request));
-            putSeInformado(MDC_TIPO_CONSULTA, tipoConsulta(request));
-            MDC.put(MDC_ROTA, rota(request));
+            MDC.put(MDC_CONSUMIDOR, RequisicaoDeConsulta.consumidor(request));
+            putSeInformado(MDC_TIPO_CONSULTA, RequisicaoDeConsulta.tipoConsulta(request));
+            MDC.put(MDC_ROTA, RequisicaoDeConsulta.rota(request));
             response.setHeader(HEADER_CORRELATION_ID, correlationId);
 
             if (correlationIdValido) {
@@ -95,60 +89,32 @@ class ContextoRequisicaoFilter extends OncePerRequestFilter {
             }
         } finally {
             var duracaoMs = (System.nanoTime() - inicio) / 1_000_000;
-            registrarAcesso(request, response, duracaoMs);
-            if (RegistroDeConsumoHttp.ehConsulta(request)) {
+            registrarAcesso(request, response, duracaoMs, cache);
+            if (RequisicaoDeConsulta.ehRotaDeConsulta(request)) {
                 registroDeConsumo.registrar(request, response, instanteInicio, duracaoMs, correlationId, cache);
             }
             CacheDaRequisicao.encerrar();
-            MDC.clear();
+            CHAVES_DO_MDC.forEach(MDC::remove);
         }
     }
 
-    private static void registrarAcesso(HttpServletRequest request, HttpServletResponse response, long duracaoMs) {
+    private static void registrarAcesso(HttpServletRequest request, HttpServletResponse response, long duracaoMs,
+                                        CacheDaRequisicao.Contagem cache) {
         var log = ACESSO.atInfo()
                 .addKeyValue("metodo", request.getMethod())
                 .addKeyValue("uri", request.getRequestURI())
-                .addKeyValue("blocos", blocos(request))
+                .addKeyValue("blocos", RequisicaoDeConsulta.blocos(request))
                 .addKeyValue("status", response.getStatus())
-                .addKeyValue("duracao_ms", duracaoMs);
-        for (var parametro : List.of(ParametrosConsulta.ID_OPERACAO, ParametrosConsulta.CPF_CNPJ,
-                ParametrosConsulta.CONTA, ParametrosConsulta.LIMITE_OPERACOES, "fields", "filter")) {
+                .addKeyValue("duracao_ms", duracaoMs)
+                .addKeyValue("cache_hits", cache.hits())
+                .addKeyValue("cache_misses", cache.misses());
+        for (var parametro : PARAMETROS_NO_LOG) {
             var valor = request.getParameter(parametro);
             if (valor != null) {
                 log = log.addKeyValue(parametro, valor);
             }
         }
         log.log("Requisição atendida");
-    }
-
-    /** Blocos pedidos: {@code operacao} e {@code originacao} sempre, mais os do {@code expand}. */
-    static List<String> blocos(HttpServletRequest request) {
-        var blocos = new LinkedHashSet<>(BLOCOS_SEMPRE);
-        var expand = request.getParameter("expand");
-        if (expand != null) {
-            Arrays.stream(expand.split(","))
-                    .map(String::strip)
-                    .filter(bloco -> !bloco.isEmpty())
-                    .forEach(blocos::add);
-        }
-        return List.copyOf(blocos);
-    }
-
-    static String consumidor(HttpServletRequest request) {
-        var consumidor = request.getHeader(HEADER_CONSUMIDOR);
-        return consumidor == null || consumidor.isBlank() ? CONSUMIDOR_DESCONHECIDO : consumidor.strip();
-    }
-
-    static String tipoConsulta(HttpServletRequest request) {
-        var tipo = request.getHeader(ParametrosConsulta.HEADER_TIPO_CONSULTA);
-        if (tipo == null || tipo.isBlank()) {
-            return null;
-        }
-        return TIPOS_VALIDOS.contains(tipo) ? tipo : TIPO_INVALIDO;
-    }
-
-    static String rota(HttpServletRequest request) {
-        return request.getRequestURI().endsWith("/fonte-primaria") ? "fonte_primaria" : "visao_consolidada";
     }
 
     private static void putSeInformado(String chave, String valor) {

@@ -64,6 +64,41 @@ class LogDeAcessoIT {
         assertThat(acesso.path("duracao_ms").isNumber()).isTrue();
         assertThat(acesso.path("duracao_ms").asLong()).isNotNegative();
         assertThat(acesso.path("id_operacao").asString()).isEqualTo("100000001");
+        // Cache desligado neste contexto: contadores por bloco presentes e vazios (ver LogDeAcessoComCacheIT)
+        assertThat(acesso.path("cache_hits").isObject()).isTrue();
+        assertThat(acesso.path("cache_misses").isObject()).isTrue();
+    }
+
+    @Test
+    void consumidorForaDoFormatoApareceComoInvalidoNoLog(CapturedOutput saida) {
+        var correlationId = novoCorrelationId();
+        var consumidor = "consumidor com espaco " + UUID.randomUUID();
+
+        client.get().uri(ROTA + "?id_operacao=100000001")
+                .header("x-tipo-consulta", "OPERACAO")
+                .header("x-consumidor", consumidor)
+                .header("x-correlationid", correlationId)
+                .exchange()
+                .expectStatus().isOk();
+
+        assertThat(logDeAcesso(saida, correlationId).path("consumidor").asString()).isEqualTo("invalido");
+        assertThat(saida.getAll()).doesNotContain(consumidor);
+    }
+
+    @Test
+    void parametroRepetidoE400ComLogDeAcesso(CapturedOutput saida) {
+        var correlationId = novoCorrelationId();
+
+        client.get().uri(ROTA + "?id_operacao=100000001&id_operacao=100000002")
+                .header("x-tipo-consulta", "OPERACAO")
+                .header("x-correlationid", correlationId)
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody()
+                .jsonPath("$.detail").value(String.class, detalhe -> assertThat(detalhe)
+                        .startsWith("Parâmetro id_operacao informado mais de uma vez"));
+
+        assertThat(logDeAcesso(saida, correlationId).path("status").asInt()).isEqualTo(400);
     }
 
     @Test

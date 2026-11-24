@@ -46,6 +46,9 @@ x-blocos-indisponiveis: plano,saldo
 - `expand`: blocos separados por vírgula, com o nome canônico (o mesmo da chave no JSON e do sufixo da SK):
   `operacao`, `originacao`, `componentes`, `parcelas`, `amortizacoes`, `recebimentos`, `plano`, `saldo`,
   `controles_iof`. `operacao` e `originacao` vêm sempre; repetições e espaços em volta dos nomes são ignorados.
+- Cada parâmetro do contrato (`id_operacao`, `cpf_cnpj`, `conta`, `limite_operacoes`, `expand`, `fields`,
+  `filter`) vai no máximo uma vez: listas vão separadas por vírgula no mesmo parâmetro. Repetido
+  (`expand=parcelas&expand=saldo`, `filter=a&filter=b`) é 400, para que dois filtros não virem um "ou" sem aviso.
 - Só os blocos pedidos e fora do cache são lidos do DynamoDB (um `BatchGetItem` com uma chave por bloco).
 - Bloco pedido e ainda ausente na visão consolidada: chave com `null` e o bloco listado em
   `x-blocos-indisponiveis` (ordem canônica). Blocos-lista vazios (`[]`) não são indisponíveis.
@@ -61,6 +64,8 @@ x-blocos-indisponiveis: plano,saldo
   - Cada condição filtra só a sua lista: os itens do bloco-lista ou, em bloco-objeto, a primeira lista do
     caminho (`saldo.saldo_parcelas.saldo_devedor=gt=0`). Listas mais internas valem se algum item atende.
   - Em `operacao`/`originacao` a operação que não atende sai de `data` (consulta por operação: `{"data": []}`).
+    Os dois blocos filtram o mesmo alvo (a operação), então podem ser ligados por `,` (ou):
+    `operacao.situacao_operacao_credito==ATIVA,originacao.canal_contratacao==MOBILE`.
   - Campo nulo ou ausente só atende a `!=` e `=out=`; texto e booleano aceitam só `==`, `!=`, `=in=`, `=out=`.
   - 400: sintaxe inválida, bloco ou campo fora do catálogo, bloco fora do `expand`, campo composto, argumento
     fora do tipo, campo de primeiro nível de bloco-objeto que não seja `operacao`/`originacao`, ou `,` (ou)
@@ -71,11 +76,11 @@ x-blocos-indisponiveis: plano,saldo
 | Operação encontrada | 200 |
 | Algum bloco pedido ausente na visão consolidada | 200 + `x-blocos-indisponiveis` |
 | Operação inexistente | 404 (Problem Details) |
-| `x-tipo-consulta` ausente/inválido, `id_operacao` ausente/não numérico, parâmetro incoerente com o tipo (`cpf_cnpj`, `conta` ou `limite_operacoes` em `OPERACAO`; `id_operacao` em `CLIENTE`/`CONTA`) | 400 (Problem Details) |
+| `x-tipo-consulta` ausente/inválido (o detalhe lista os valores válidos, sem ecoar o recebido), `id_operacao` ausente/não numérico/com mais de 18 dígitos, parâmetro incoerente com o tipo (`cpf_cnpj`, `conta` ou `limite_operacoes` em `OPERACAO`; `id_operacao` em `CLIENTE`/`CONTA`), parâmetro do contrato repetido | 400 (Problem Details) |
 | Bloco desconhecido no `expand` (inclusive maiúsculas ou item vazio) | 400 (Problem Details listando os blocos válidos) |
 | `fields` malformado, com bloco desconhecido, bloco fora do `expand` (sem expansão implícita) ou campo fora do catálogo | 400 (Problem Details listando blocos ou campos válidos) |
 | `CLIENTE`/`CONTA` sem operações | 200 com `{"data": []}` |
-| `cpf_cnpj` que não é CPF (11 dígitos) ou CNPJ (14 caracteres, alfanumérico em maiúsculas) com DV válido; `conta` com caractere não numérico; `limite_operacoes` fora de 1 a 500 | 400 (Problem Details) |
+| `cpf_cnpj` que não é CPF (11 dígitos) ou CNPJ (14 caracteres, alfanumérico em maiúsculas) com DV válido; `conta` com caractere não numérico ou mais de 20 dígitos (barrada antes de virar chave no DynamoDB); `limite_operacoes` fora de 1 a 500 | 400 (Problem Details) |
 | Prazo da requisição do tipo de consulta esgotado (DynamoDB lento) | 504 (Problem Details sugerindo `limite_operacoes`, menos blocos no `expand` e a consulta por `OPERACAO`) |
 | Falha do DynamoDB depois do retry do SDK | 502 (Problem Details) |
 | Circuit breaker do DynamoDB aberto, bulkhead cheio (total ou de CLIENTE/CONTA) ou rate limiter interno sem permissão | 503 (Problem Details) + `Retry-After` em segundos |
@@ -217,8 +222,9 @@ Cada requisição às rotas de consulta, com sucesso ou erro, gera um evento de 
   `tipo_consulta`, `id_operacao`, `cpf_cnpj_hmac`, `conta_hmac`, `blocos_solicitados`, `campos_solicitados`,
   `filtro`, `limite_operacoes`, `quantidade_operacoes_retornadas`, `blocos_indisponiveis`, `cache_hits` e
   `cache_misses` por bloco, `status_http`, `codigo_erro`, `duracao_ms`.
-- CPF/CNPJ e conta só como HMAC-SHA256 (hex) com `consultas.eventos.segredo-hmac`, também dentro do `filtro`;
-  nunca em claro. Blocos e campos malformados ficam fora do evento.
+- CPF/CNPJ e conta só como HMAC-SHA256 (hex) com `consultas.eventos.segredo-hmac`, também dentro do `filtro`
+  (com ou sem pontuação: `529.982.247-25` dá o mesmo HMAC de `52998224725`); nunca em claro. Blocos e campos
+  malformados ficam fora do evento. `consumidor` é o mesmo valor normalizado de logs e métricas.
 - Montado no fim do `ContextoRequisicaoFilter` (`RegistroDeConsumoHttp`). Os hits e misses de cache da requisição
   são contados no `CacheDaRequisicao`, aberto pela borda HTTP e propagado às threads filhas como o MDC.
 - **Best-effort e assíncrono**: a requisição só põe o evento numa fila em memória limitada
@@ -232,8 +238,9 @@ Cada requisição às rotas de consulta, com sucesso ou erro, gera um evento de 
   SDK (`standard`).
 - Encerramento gracioso: depois que o servidor web para de atender, o que restou na fila é enviado por até
   `consultas.eventos.fila.tempo-maximo-drenagem` (10 s).
-- `consultas.eventos.habilitado=false` desliga o evento (nada é montado nem enviado). Ligado, `segredo-hmac` e
-  `sqs.url-fila` são obrigatórios (a aplicação não sobe sem eles).
+- `consultas.eventos.habilitado=false` desliga o evento (nada é montado nem enviado). Ligado, `segredo-hmac` (pelo
+  menos 32 bytes, ex.: `openssl rand -base64 48`) e `sqs.url-fila` são obrigatórios (a aplicação não sobe sem
+  eles). O segredo nunca aparece no `toString()` das propriedades.
 
 ## Catálogo de campos
 
@@ -254,14 +261,20 @@ Um filtro (`ContextoRequisicaoFilter`) roda antes de qualquer processamento em t
 | Header | Regra |
 | --- | --- |
 | `x-correlationid` | Até 64 caracteres `[A-Za-z0-9-]`. Ausente: UUID gerado. Inválido: 400 (com um UUID novo). Sempre devolvido na resposta |
-| `x-consumidor` | Ausente: `desconhecido` |
+| `x-consumidor` | Sem espaços nas pontas. Ausente: `desconhecido`. Fora de `[A-Za-z0-9._-]{1,64}`: `invalido` (o valor recebido não vai a log, evento nem métrica) |
 
-- `correlation_id`, `consumidor`, `tipo_consulta` (ou `invalido`) e `rota` vão para o MDC e são removidos ao final.
-  Todo Problem Details traz a propriedade `correlation_id`.
+- `correlation_id`, `consumidor`, `tipo_consulta` (ou `invalido`) e `rota` vão para o MDC e, ao final, só essas
+  chaves são removidas (as do tracing, como `traceId`/`spanId`, ficam com quem as pôs). Todo Problem Details traz a
+  propriedade `correlation_id`.
+- Rota, consumidor, tipo de consulta e blocos pedidos são lidos por uma única regra (`RequisicaoDeConsulta`) para
+  MDC, log de acesso, evento de consumo, prazo e métricas; só as rotas exatas `/v1/operacoes-credito` e
+  `/v1/operacoes-credito/fonte-primaria` geram evento e contam em `consultas.blocos`.
 - Logs em JSON (structured logging ECS do Spring Boot) por um `AsyncAppender` (`logback-spring.xml`).
   Perfil `human-logs` para texto legível em desenvolvimento.
 - Um log de acesso por requisição (logger `acesso`): `metodo`, `uri`, `blocos`, `status`, `duracao_ms`,
-  parâmetros informados (`id_operacao`, `cpf_cnpj`, `conta`, `limite_operacoes`, `fields`, `filter`) e o MDC.
+  `cache_hits` e `cache_misses` por bloco (objeto `bloco → quantidade`, vazio na fonte primária ou com o cache
+  desligado), parâmetros informados (`id_operacao`, `cpf_cnpj`, `conta`, `limite_operacoes`, `fields`, `filter`)
+  e o MDC.
 - CPF/CNPJ e conta saem sempre mascarados (`529******25`, `***********5874`) em todo log: campos com esses
   nomes, segmentos de rota `/clientes/<cpf_cnpj>` e `/contas/<conta>` (URLs do gateway do mainframe), pares
   `chave=valor`/RSQL/JSON e CPF/CNPJ soltos com DV válido (`MascaramentoLogCustomizer`).
@@ -378,7 +391,7 @@ CONSULTAS_DYNAMODB_CREDENCIAIS_ACCESS_KEY_ID=test CONSULTAS_DYNAMODB_CREDENCIAIS
 CONSULTAS_EVENTOS_SQS_ENDPOINT=http://localhost:4566 \
 CONSULTAS_EVENTOS_SQS_URL_FILA=http://localhost:4566/000000000000/consultas-eventos-consumo \
 CONSULTAS_EVENTOS_SQS_CREDENCIAIS_ACCESS_KEY_ID=test CONSULTAS_EVENTOS_SQS_CREDENCIAIS_SECRET_ACCESS_KEY=test \
-CONSULTAS_EVENTOS_SEGREDO_HMAC=segredo-local \
+CONSULTAS_EVENTOS_SEGREDO_HMAC=segredo-local-somente-desenvolvimento \
 ./mvnw spring-boot:run
 ```
 

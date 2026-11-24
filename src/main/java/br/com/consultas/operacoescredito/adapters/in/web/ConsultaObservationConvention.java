@@ -6,15 +6,13 @@ import org.springframework.http.server.observation.DefaultServerRequestObservati
 import org.springframework.http.server.observation.ServerRequestObservationContext;
 import org.springframework.stereotype.Component;
 
-import java.util.regex.Pattern;
-
 /**
  * Tags das requisições HTTP ({@code http.server.requests} e span raiz). Além das padrão do Spring
  * ({@code method}, {@code uri} como template, {@code status}, {@code outcome}, {@code exception}):
  * <ul>
  *     <li>baixa cardinalidade (métricas e span): {@code consumidor}, {@code tipo_consulta}, {@code rota};</li>
  *     <li>alta cardinalidade (só span): {@code correlation_id} e os identificadores da consulta, que
- *     saem mascarados quando são dados pessoais ({@code MascaramentoSpanFilter}).</li>
+ *     saem mascarados quando são dados pessoais ({@code MascaramentoSpanExporter}).</li>
  * </ul>
  * Valores lidos da requisição pelas mesmas regras do {@link ContextoRequisicaoFilter}.
  */
@@ -25,19 +23,16 @@ class ConsultaObservationConvention extends DefaultServerRequestObservationConve
     static final String TIPO_CONSULTA = "tipo_consulta";
     static final String ROTA = "rota";
     static final String NENHUM = "nenhum";
-    static final String INVALIDO = "invalido";
 
-    /** Consumidor vira tag: valor fora deste formato não entra, para não explodir a cardinalidade. */
-    private static final Pattern CONSUMIDOR_VALIDO = Pattern.compile("[A-Za-z0-9._-]{1,64}");
-
+    /** Consumidor vira tag já normalizado ({@link RequisicaoDeConsulta#consumidor}), sem explodir a cardinalidade. */
     @Override
     public KeyValues getLowCardinalityKeyValues(ServerRequestObservationContext context) {
         var request = context.getCarrier();
-        var tipoConsulta = ContextoRequisicaoFilter.tipoConsulta(request);
+        var tipoConsulta = RequisicaoDeConsulta.tipoConsulta(request);
         return super.getLowCardinalityKeyValues(context).and(
-                KeyValue.of(CONSUMIDOR, consumidor(ContextoRequisicaoFilter.consumidor(request))),
+                KeyValue.of(CONSUMIDOR, RequisicaoDeConsulta.consumidor(request)),
                 KeyValue.of(TIPO_CONSULTA, tipoConsulta == null ? NENHUM : tipoConsulta),
-                KeyValue.of(ROTA, ContextoRequisicaoFilter.rota(request)));
+                KeyValue.of(ROTA, RequisicaoDeConsulta.rota(request)));
     }
 
     @Override
@@ -57,9 +52,5 @@ class ConsultaObservationConvention extends DefaultServerRequestObservationConve
             }
         }
         return valores;
-    }
-
-    private static String consumidor(String consumidor) {
-        return CONSUMIDOR_VALIDO.matcher(consumidor).matches() ? consumidor : INVALIDO;
     }
 }

@@ -101,6 +101,21 @@ class MetricasIT {
     }
 
     @Test
+    void rotaInexistenteSobOPrefixoDaConsultaNaoContaBlocos() {
+        var consumidor = novoConsumidor();
+
+        client.get().uri(ROTA + "/xyz?id_operacao=100000001&expand=parcelas")
+                .header("x-tipo-consulta", "OPERACAO")
+                .header("x-consumidor", consumidor)
+                .exchange()
+                .expectStatus().isNotFound();
+
+        assertThat(contagemOuZero("consultas.blocos", "consumidor:" + consumidor)).isZero();
+        assertThat(contagem(metrica("http.server.requests", "consumidor:" + consumidor, "status:404")))
+                .isEqualTo(1.0);
+    }
+
+    @Test
     void requisicaoRejeitadaPeloContextoTambemEMedida() {
         var consumidor = novoConsumidor();
 

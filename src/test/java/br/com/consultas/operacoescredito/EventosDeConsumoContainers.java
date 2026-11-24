@@ -24,7 +24,7 @@ import java.util.HexFormat;
 public class EventosDeConsumoContainers {
 
     static final String FILA = "consultas-eventos-consumo";
-    static final String SEGREDO_HMAC = "segredo-de-teste-do-hmac";
+    static final String SEGREDO_HMAC = "segredo-de-teste-do-hmac-com-32-bytes-ou-mais";
 
     @Bean
     DynamicPropertyRegistrar eventosDeConsumoProperties(LocalStackContainer localStack) {

@@ -49,14 +49,21 @@ public sealed interface CriterioConsulta {
     /**
      * Operações vinculadas à conta, das mais recentes para as mais antigas por data de contratação.
      *
-     * @param conta            número da conta, só dígitos
+     * @param conta            número da conta, de 1 a {@value #TAMANHO_MAXIMO_CONTA} dígitos
      * @param limiteOperacoes  quantas operações devolver; vazio devolve todas
      */
     record PorConta(String conta, OptionalInt limiteOperacoes) implements CriterioConsulta {
 
+        /**
+         * Maior número de dígitos aceito na conta: folga sobre os 15 dígitos das contas da massa e muito abaixo do limite de chave do DynamoDB, para que uma conta absurda seja 400 e não uma falha na
+         * fonte.
+         */
+        public static final int TAMANHO_MAXIMO_CONTA = 20;
+
         public PorConta {
-            if (conta == null || conta.isEmpty() || !conta.chars().allMatch(c -> c >= '0' && c <= '9')) {
-                throw new IllegalArgumentException("conta deve ter só dígitos");
+            if (conta == null || conta.isEmpty() || conta.length() > TAMANHO_MAXIMO_CONTA
+                    || !conta.chars().allMatch(c -> c >= '0' && c <= '9')) {
+                throw new IllegalArgumentException("conta deve ter de 1 a " + TAMANHO_MAXIMO_CONTA + " dígitos");
             }
             validarLimite(limiteOperacoes);
         }
