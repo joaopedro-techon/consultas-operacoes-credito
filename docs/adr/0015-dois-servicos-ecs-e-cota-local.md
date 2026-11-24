@@ -1,4 +1,10 @@
+---
+status: superseded by ADR-0017
+---
+
 # Dois serviços ECS e cota do mainframe dividida localmente por task
+
+> Substituído pelo ADR-0017 no desenho de "mesma imagem, propriedade `consultas.rotas-ativas`": cada serviço passa a ter o seu repositório e a sua imagem. A cota local por task, o 429 com `Retry-After` e o deploy com `maximumPercent=100` continuam valendo para o serviço `fonte-primaria`.
 
 A mesma imagem roda como dois serviços ECS Fargate, `visao-consolidada` e `fonte-primaria`. O ALB separa os dois por path (`/v1/operacoes-credito/fonte-primaria*`) e cada serviço escala pelo seu `ALBRequestCountPerTarget`. Uma propriedade (`consultas.rotas-ativas`) liga só a rota daquele serviço.
 
