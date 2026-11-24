@@ -189,6 +189,16 @@ class ConsultaClienteContaIT {
                 .jsonPath("$.detail").value(String.class, detail -> assertThat(detail).contains("conta"));
     }
 
+    @ParameterizedTest(name = "conta com {0} dígitos -> 400 sem ir ao DynamoDB")
+    @ValueSource(ints = {21, 3000})
+    void contaLongaDemaisDevolve400(int digitos) {
+        consultar("CONTA", "conta=" + "1".repeat(digitos))
+                .expectStatus().isBadRequest()
+                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectBody()
+                .jsonPath("$.detail").isEqualTo("Parâmetro conta deve ter só dígitos, de 1 a 20 dígitos");
+    }
+
     @ParameterizedTest(name = "{0} com limite_operacoes={2} -> 400")
     @CsvSource(delimiter = '|', textBlock = """
             CLIENTE | cpf_cnpj=52998224725  | 0
