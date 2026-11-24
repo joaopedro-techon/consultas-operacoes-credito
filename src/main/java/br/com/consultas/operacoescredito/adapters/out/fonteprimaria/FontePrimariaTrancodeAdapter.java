@@ -14,7 +14,6 @@ import io.micrometer.observation.ObservationRegistry;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
 
-import java.io.InterruptedIOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
@@ -25,11 +24,13 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 /**
@@ -42,7 +43,8 @@ import java.util.function.Supplier;
  * </ul>
  * As chamadas de bloco rodam em paralelo (etapa {@value #ETAPA_FAN_OUT}), em virtual threads com o contexto
  * da requisição (MDC, trace) e no máximo {@code maxChamadasSimultaneas} ao mesmo tempo por requisição.
- * A primeira chamada que falhar derruba a requisição inteira (sem resposta parcial) e interrompe as demais.
+ * A primeira chamada que falhar derruba a requisição inteira (sem resposta parcial) e interrompe as demais, salvo
+ * a recusa do circuito meio-aberto, que deixa terminar as chamadas em andamento (as sondas dele, ADR-0009).
  * Cada chamada passa pela {@link ResilienciaFontePrimaria}, e nada espera além do {@link PrazoDaRequisicao}:
  * nem a vaga no fan-out, nem a resposta do gateway, nem o fan-out como um todo (504).
  * Bloco inexistente no gateway (404) vem {@code null}; sem o bloco {@code operacao}, a operação não existe.
@@ -88,7 +90,8 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
     @Override
     public List<OperacaoConsultada> buscar(CriterioConsulta criterio, Set<Bloco> blocos) {
         return switch (criterio) {
-            case CriterioConsulta.PorOperacao porOperacao -> detalhar(List.of(porOperacao.idOperacao()), blocos);
+            case CriterioConsulta.PorOperacao porOperacao ->
+                    detalhar(List.of(porOperacao.idOperacao()), blocos, false);
             case CriterioConsulta.PorCliente porCliente -> buscarPorLista(LISTA_DO_CLIENTE,
                     () -> gateway.operacoesDoCliente(porCliente.cpfCnpj()), porCliente.limiteOperacoes(), blocos);
             case CriterioConsulta.PorConta porConta -> buscarPorLista(LISTA_DA_CONTA,
@@ -100,7 +103,7 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
                                                     Set<Bloco> blocos) {
         var ids = Observacoes.etapa(observationRegistry, ETAPA_LISTA)
                 .observe(() -> listarOperacoes(lista, chamada, limite));
-        return ids.isEmpty() ? List.of() : detalhar(ids, blocos);
+        return ids.isEmpty() ? List.of() : detalhar(ids, blocos, true);
     }
 
     /**
@@ -109,7 +112,7 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
      * 404 do gateway: cliente ou conta sem operações.
      */
     private List<Long> listarOperacoes(String lista, Supplier<String> chamada, OptionalInt limite) {
-        var trancode = chamar(lista, "a lista de operações", chamada);
+        var trancode = chamar(lista, "a lista de operações", true, chamada);
         if (trancode.isEmpty()) {
             return List.of();
         }
@@ -125,10 +128,10 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
     }
 
     /** Fan-out de uma chamada por operação × bloco; devolve as operações na ordem de {@code ids}. */
-    private List<OperacaoConsultada> detalhar(List<Long> ids, Set<Bloco> blocos) {
+    private List<OperacaoConsultada> detalhar(List<Long> ids, Set<Bloco> blocos, boolean clienteConta) {
         var conteudos = Observacoes.etapa(observationRegistry, ETAPA_FAN_OUT)
                 .highCardinalityKeyValue("operacoes", Integer.toString(ids.size()))
-                .observe(() -> lerBlocosEmParalelo(ids, blocos));
+                .observe(() -> lerBlocosEmParalelo(ids, blocos, clienteConta));
         var operacoes = new ArrayList<OperacaoConsultada>(ids.size());
         for (var id : ids) {
             var blocosDaOperacao = conteudos.get(id);
@@ -143,8 +146,10 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
         return operacoes;
     }
 
-    private Map<Long, Map<Bloco, Optional<Object>>> lerBlocosEmParalelo(List<Long> ids, Set<Bloco> blocos) {
+    private Map<Long, Map<Bloco, Optional<Object>>> lerBlocosEmParalelo(List<Long> ids, Set<Bloco> blocos,
+                                                                        boolean clienteConta) {
         var vagas = new Semaphore(maxChamadasSimultaneas);
+        var desistiu = new AtomicBoolean();
         var conteudos = new HashMap<Long, Map<Bloco, Optional<Object>>>();
         try (var executor = ContextExecutorService.wrap(Executors.newVirtualThreadPerTaskExecutor(), contexto)) {
             var concluidas = new ExecutorCompletionService<BlocoLido>(executor);
@@ -152,7 +157,7 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
             for (var id : ids) {
                 conteudos.put(id, new EnumMap<>(Bloco.class));
                 for (var bloco : blocos) {
-                    concluidas.submit(() -> lerBlocoNaVez(vagas, id, bloco));
+                    concluidas.submit(() -> lerBlocoNaVez(vagas, desistiu, id, bloco, clienteConta));
                     chamadas++;
                 }
             }
@@ -162,15 +167,25 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
                     conteudos.get(lido.idOperacao()).put(lido.bloco(), lido.conteudo());
                 }
             } catch (RuntimeException e) {
-                // Sem resposta parcial: a primeira falha interrompe as chamadas em andamento e as que esperam vaga
-                executor.shutdownNow();
+                // Sem resposta parcial: a primeira falha cancela as chamadas que ainda esperam vaga
+                desistiu.set(true);
+                if (resiliencia.recusadaNoMeioAberto(e)) {
+                    // Circuito meio-aberto sem permissão para mais chamadas: as chamadas em andamento são as
+                    // sondas dele. Interrompidas, o circuito as ignoraria e, com fan-outs maiores que as chamadas
+                    // permitidas, nunca fecharia; então elas terminam (no máximo até o prazo da requisição)
+                    executor.shutdown();
+                } else {
+                    // Demais falhas: interrompe também as chamadas em andamento
+                    executor.shutdownNow();
+                }
                 throw e;
             }
         }
         return conteudos;
     }
 
-    private BlocoLido lerBlocoNaVez(Semaphore vagas, long idOperacao, Bloco bloco) throws InterruptedException {
+    private BlocoLido lerBlocoNaVez(Semaphore vagas, AtomicBoolean desistiu, long idOperacao, Bloco bloco,
+                                    boolean clienteConta) throws InterruptedException {
         var restante = PrazoDaRequisicao.restante();
         if (restante.isEmpty()) {
             vagas.acquire();
@@ -178,7 +193,10 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
             throw prazoDaRequisicaoEsgotado("o bloco " + bloco.nome());
         }
         try {
-            var conteudo = chamar(bloco.nome(), "o bloco " + bloco.nome(),
+            if (desistiu.get()) {
+                throw new CancellationException("Fan-out da " + FONTE + " cancelado por outra chamada");
+            }
+            var conteudo = chamar(bloco.nome(), "o bloco " + bloco.nome(), clienteConta,
                     () -> gateway.bloco(idOperacao, bloco.nome()))
                     .map(trancode -> parser.ler(trancode, layouts.de(bloco)));
             return new BlocoLido(idOperacao, bloco, conteudo);
@@ -192,12 +210,13 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
      * bulkhead); 404 não é erro e vem vazio. Prazo esgotado (conexão, pool, resposta ou prazo da requisição) é
      * distinguido das demais falhas.
      */
-    private Optional<String> chamar(String operacao, String descricao, Supplier<String> chamada) {
+    private Optional<String> chamar(String operacao, String descricao, boolean clienteConta,
+                                    Supplier<String> chamada) {
         try {
-            return resiliencia.executar(() -> tentar(operacao, descricao, chamada));
+            return resiliencia.executar(clienteConta, () -> tentar(operacao, descricao, chamada));
         } catch (RestClientException e) {
             var mensagem = "Falha ao consultar " + descricao + " na " + FONTE;
-            if (prazoEsgotado(e)) {
+            if (FalhasDoGateway.timeout(e)) {
                 throw new TempoEsgotadoNaFonteDeOperacoesException(mensagem + ": prazo esgotado", e);
             }
             throw new FalhaNaFonteDeOperacoesException(mensagem, e);
@@ -229,16 +248,6 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
     private static TempoEsgotadoNaFonteDeOperacoesException prazoDaRequisicaoEsgotado(String descricao) {
         return new TempoEsgotadoNaFonteDeOperacoesException(
                 "Prazo da requisição esgotado antes de consultar " + descricao + " na " + FONTE);
-    }
-
-    /** Timeouts de conexão, de obtenção de conexão do pool e de resposta são {@link InterruptedIOException}. */
-    private static boolean prazoEsgotado(Throwable erro) {
-        for (var causa = erro; causa != null; causa = causa.getCause()) {
-            if (causa instanceof InterruptedIOException) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /** Próxima chamada concluída; sem esperar além do prazo da requisição. */
