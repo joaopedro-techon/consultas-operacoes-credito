@@ -82,9 +82,13 @@ consultas:
     timeout-chamada: 1s
     # Teto de cada tentativa: uma tentativa presa ainda deixa prazo para o retry do SDK
     timeout-tentativa: ${CONSULTAS_DYNAMODB_TIMEOUT_TENTATIVA:100ms}
-    # Cliente HTTP do SDK (Apache HttpClient 5) com pool próprio
+    # CLIENTE/CONTA: lotes de BatchGetItem (100 chaves) em andamento ao mesmo tempo por consulta
+    max-lotes-simultaneos: ${CONSULTAS_DYNAMODB_MAX_LOTES_SIMULTANEOS:4}
+    # Cliente HTTP do SDK (Apache HttpClient 5) com pool próprio. Comporta o pior caso dos bulkheads (validado na
+    # subida): (dynamodb − dynamodb-cliente-conta) + dynamodb-cliente-conta × max-lotes-simultaneos
+    # = (180 − 40) + 40 × 4 = 300. Sem conexão em timeout-obter-conexao: 503, sem contar no circuito
     pool:
-      max-conexoes: ${CONSULTAS_DYNAMODB_MAX_CONEXOES:100}
+      max-conexoes: ${CONSULTAS_DYNAMODB_MAX_CONEXOES:300}
       timeout-conexao: 100ms
       timeout-obter-conexao: 20ms
       timeout-resposta: 1s
@@ -152,7 +156,9 @@ consultas:
 resilience4j:
   circuitbreaker:
     instances:
-      # Visão consolidada: conta cada Query/BatchGetItem depois do retry do SDK; aberto → 503 sem chamar o DynamoDB
+      # Visão consolidada: conta cada Query/BatchGetItem depois do retry do SDK (throttling e UnprocessedKeys
+      # restantes incluídos); aberto → 503 sem chamar o DynamoDB. Não contam: chamadas interrompidas, timeouts
+      # encurtados pelo prazo da requisição, pool de conexões esgotado e 4xx que não são throttling (ADR-0010)
       dynamodb:
         sliding-window-type: COUNT_BASED
         sliding-window-size: 50
@@ -191,13 +197,14 @@ resilience4j:
         permitted-number-of-calls-in-half-open-state: 2
   bulkhead:
     instances:
-      # Consultas simultâneas na visão consolidada (todos os tipos); cheio → 503
+      # Consultas simultâneas na visão consolidada (todos os tipos); cheio → 503. Junto com o de CLIENTE/CONTA e
+      # consultas.dynamodb.max-lotes-simultaneos, define as conexões necessárias no pool (consultas.dynamodb.pool)
       dynamodb:
-        max-concurrent-calls: 200
+        max-concurrent-calls: 180
         max-wait-duration: 0ms
-      # Teto próprio de CLIENTE/CONTA (mais caras), abaixo do total: sempre sobra vaga para OPERACAO
+      # Teto próprio de CLIENTE/CONTA (mais caras), abaixo do total: sempre sobram 140 vagas para OPERACAO
       dynamodb-cliente-conta:
-        max-concurrent-calls: 60
+        max-concurrent-calls: 40
         max-wait-duration: 0ms
       fontePrimaria:
         # Igual ao pool de conexões: acima disso a chamada só esperaria conexão

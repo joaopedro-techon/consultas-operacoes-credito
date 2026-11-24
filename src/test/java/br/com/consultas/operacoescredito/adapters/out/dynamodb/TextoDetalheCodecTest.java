@@ -50,7 +50,7 @@ class TextoDetalheCodecTest {
         var bytes = "{\"id_operacao\":1}".getBytes(StandardCharsets.UTF_8);
 
         assertThatThrownBy(() -> codec.decodificar(bytes))
-                .isInstanceOf(TextoDetalheCodec.TextoDetalheInvalidoException.class);
+                .isInstanceOf(VisaoConsolidadaInvalidaException.class);
     }
 
     @Test
@@ -58,7 +58,7 @@ class TextoDetalheCodecTest {
         var bytes = gzip("{\"id_operacao\":");
 
         assertThatThrownBy(() -> codec.decodificar(bytes))
-                .isInstanceOf(TextoDetalheCodec.TextoDetalheInvalidoException.class);
+                .isInstanceOf(VisaoConsolidadaInvalidaException.class);
     }
 
     private static byte[] gzip(String json) throws IOException {

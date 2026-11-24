@@ -38,19 +38,53 @@ class DynamoDbConfig {
     @Bean
     ResilienciaDynamoDb resilienciaDynamoDb(DynamoDbProperties properties, CircuitBreakerRegistry circuitBreakers,
                                             BulkheadRegistry bulkheads, RateLimiterRegistry rateLimiters) {
+        var bulkhead = bulkheads.bulkhead(ResilienciaDynamoDb.NOME);
+        var bulkheadClienteConta = bulkheads.bulkhead(ResilienciaDynamoDb.BULKHEAD_CLIENTE_CONTA);
+        validarDimensionamento(properties.pool().maxConexoes(),
+                bulkhead.getBulkheadConfig().getMaxConcurrentCalls(),
+                bulkheadClienteConta.getBulkheadConfig().getMaxConcurrentCalls(),
+                properties.maxLotesSimultaneos());
         return new ResilienciaDynamoDb(
                 circuitBreakers.circuitBreaker(ResilienciaDynamoDb.NOME),
-                bulkheads.bulkhead(ResilienciaDynamoDb.NOME),
-                bulkheads.bulkhead(ResilienciaDynamoDb.BULKHEAD_CLIENTE_CONTA),
+                bulkhead,
+                bulkheadClienteConta,
                 rateLimiters.rateLimiter(ResilienciaDynamoDb.NOME),
                 properties.timeoutChamada());
     }
 
-    /** Chamadas cortadas pela própria aplicação (lote cancelado, requisição encerrada) não contam no circuito. */
+    /**
+     * Conexões que as consultas admitidas pelos bulkheads podem ocupar ao mesmo tempo: cada OPERACAO uma (uma
+     * chamada por vez), cada CLIENTE/CONTA até {@code max-lotes-simultaneos} (a {@code Query} vem antes dos lotes).
+     * {@code (bulkhead dynamodb − bulkhead dynamodb-cliente-conta) + bulkhead dynamodb-cliente-conta ×
+     * max-lotes-simultaneos}.
+     */
+    static int conexoesNecessarias(int bulkheadTotal, int bulkheadClienteConta, int maxLotesSimultaneos) {
+        var clienteConta = Math.min(bulkheadTotal, bulkheadClienteConta);
+        return bulkheadTotal - clienteConta + clienteConta * maxLotesSimultaneos;
+    }
+
+    /**
+     * Falha na subida se o pool não comporta o pior caso dos bulkheads: senão, com o DynamoDB saudável, consultas
+     * admitidas esperariam conexão e falhariam por {@code timeout-obter-conexao} (503).
+     */
+    static void validarDimensionamento(int maxConexoes, int bulkheadTotal, int bulkheadClienteConta,
+                                       int maxLotesSimultaneos) {
+        var necessarias = conexoesNecessarias(bulkheadTotal, bulkheadClienteConta, maxLotesSimultaneos);
+        if (maxConexoes < necessarias) {
+            throw new IllegalStateException("consultas.dynamodb.pool.max-conexoes (" + maxConexoes
+                    + ") menor que as conexões que os bulkheads admitem (" + necessarias + " = (dynamodb "
+                    + bulkheadTotal + " − dynamodb-cliente-conta " + bulkheadClienteConta
+                    + ") + dynamodb-cliente-conta × max-lotes-simultaneos " + maxLotesSimultaneos + ")");
+        }
+    }
+
+    /**
+     * Não contam no circuito: chamadas cortadas pela própria aplicação, timeouts encurtados pelo prazo da
+     * requisição, pool de conexões esgotado e 4xx que não são throttling ({@link ResilienciaDynamoDb#ignoradaPeloCircuito}).
+     */
     @Bean
     CircuitBreakerConfigCustomizer circuitBreakerDoDynamoDb() {
-        return CircuitBreakerConfigCustomizer.of(ResilienciaDynamoDb.NOME,
-                circuito -> circuito.ignoreException(ResilienciaDynamoDb::interrompida));
+        return CircuitBreakerConfigCustomizer.of(ResilienciaDynamoDb.NOME, ResilienciaDynamoDb::classificarFalhas);
     }
 
     static DynamoDbClient construirCliente(DynamoDbProperties properties, ObservationRegistry observationRegistry) {

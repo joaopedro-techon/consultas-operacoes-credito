@@ -18,6 +18,8 @@ import java.time.Duration;
  *                         requisição, vale o menor entre ele e o que resta do prazo da requisição
  * @param timeoutTentativa teto de cada tentativa ({@code apiCallAttemptTimeout}), para que uma tentativa presa
  *                         ainda deixe prazo para o retry
+ * @param maxLotesSimultaneos lotes de {@code BatchGetItem} em andamento ao mesmo tempo numa consulta CLIENTE/CONTA
+ *                         (cada um ocupa uma conexão do pool); os demais esperam vaga dentro do prazo
  * @param pool             cliente HTTP do SDK (Apache HttpClient 5)
  * @param retry            retry do SDK, a única camada de retry do DynamoDB
  */
@@ -27,14 +29,23 @@ public record DynamoDbProperties(String tabela, String regiao, String endpoint, 
                                  @DefaultValue("gsi-conta") String indiceConta,
                                  @DefaultValue("1s") Duration timeoutChamada,
                                  @DefaultValue("100ms") Duration timeoutTentativa,
+                                 @DefaultValue("4") int maxLotesSimultaneos,
                                  @DefaultValue Pool pool,
                                  @DefaultValue Retry retry) {
+
+    public DynamoDbProperties {
+        if (maxLotesSimultaneos < 1) {
+            throw new IllegalArgumentException("consultas.dynamodb.max-lotes-simultaneos deve ser ao menos 1");
+        }
+    }
 
     public record Credenciais(String accessKeyId, String secretAccessKey) {
     }
 
     /**
-     * @param maxConexoes        conexões no pool (o bulkhead {@code dynamodb} não deve passar disso)
+     * @param maxConexoes        conexões no pool; deve comportar o pior caso dos bulkheads (regra em
+     *                           {@code DynamoDbConfig#conexoesNecessarias}): cada consulta OPERACAO usa uma conexão
+     *                           por vez e cada CLIENTE/CONTA até {@code max-lotes-simultaneos}
      * @param timeoutConexao     abertura da conexão TCP
      * @param timeoutObterConexao espera por uma conexão livre do pool
      * @param timeoutResposta    leitura do socket

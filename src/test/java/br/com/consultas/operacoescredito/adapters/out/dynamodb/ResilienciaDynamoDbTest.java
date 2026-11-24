@@ -15,7 +15,11 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import software.amazon.awssdk.awscore.AwsRequestOverrideConfiguration;
+import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
+import software.amazon.awssdk.services.dynamodb.model.DynamoDbException;
 import software.amazon.awssdk.core.exception.AbortedException;
 import software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException;
 import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
@@ -32,10 +36,7 @@ class ResilienciaDynamoDbTest {
     private static final Duration CIRCUITO_ABERTO = Duration.ofSeconds(7);
     private static final Duration PERIODO_RATE_LIMITER = Duration.ofSeconds(2);
 
-    private final CircuitBreaker circuitBreaker = CircuitBreaker.of("dynamodb", CircuitBreakerConfig.custom()
-            .slidingWindowSize(2).minimumNumberOfCalls(2).waitDurationInOpenState(CIRCUITO_ABERTO)
-            .ignoreException(ResilienciaDynamoDb::interrompida)
-            .build());
+    private final CircuitBreaker circuitBreaker = CircuitBreaker.of("dynamodb", circuito());
     private final Bulkhead bulkhead = Bulkhead.of("dynamodb", BulkheadConfig.custom()
             .maxConcurrentCalls(3).maxWaitDuration(Duration.ZERO).build());
     private final Bulkhead bulkheadClienteConta = Bulkhead.of("dynamodb-cliente-conta", BulkheadConfig.custom()
@@ -155,6 +156,119 @@ class ResilienciaDynamoDbTest {
 
         PrazoDaRequisicao.iniciar(Duration.ofSeconds(30));
         assertThat(timeoutDaRequisicao()).isEqualTo(Duration.ofSeconds(1));
+    }
+
+    @Test
+    void timeoutEncurtadoPeloPrazoDaRequisicaoViraTimeoutMasNaoContaNoCircuito() {
+        PrazoDaRequisicao.iniciar(Duration.ofMillis(5));
+
+        for (int i = 0; i < 5; i++) {
+            assertThatThrownBy(() -> resiliencia.chamada("BatchGetItem", () -> {
+                esperarOPrazoAcabar();
+                throw ApiCallTimeoutException.create(5);
+            })).isInstanceOf(TempoEsgotadoNaFonteDeOperacoesException.class);
+        }
+
+        assertThat(circuitBreaker.getMetrics().getNumberOfBufferedCalls()).isZero();
+        assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.CLOSED);
+    }
+
+    @Test
+    void timeoutComOTempoInteiroDaChamadaContaNoCircuito() {
+        PrazoDaRequisicao.iniciar(Duration.ofSeconds(30));
+
+        for (int i = 0; i < 2; i++) {
+            assertThatThrownBy(() -> resiliencia.chamada("Query", () -> {
+                throw ApiCallAttemptTimeoutException.create(100);
+            })).isInstanceOf(TempoEsgotadoNaFonteDeOperacoesException.class);
+        }
+
+        assertThat(circuitBreaker.getMetrics().getNumberOfFailedCalls()).isEqualTo(2);
+        assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.OPEN);
+    }
+
+    @Test
+    void erroDoClienteViraFalha502SemContarNoCircuito() {
+        for (int i = 0; i < 5; i++) {
+            assertThatThrownBy(() -> resiliencia.chamada("Query", () -> {
+                throw erroDoDynamoDb(400, "ValidationException");
+            })).isExactlyInstanceOf(FalhaNaFonteDeOperacoesException.class);
+        }
+
+        assertThat(circuitBreaker.getMetrics().getNumberOfBufferedCalls()).isZero();
+        assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.CLOSED);
+    }
+
+    @Test
+    void throttlingDepoisDoRetryDoSdkVira503ComRetryAfterEContaNoCircuito() {
+        for (int i = 0; i < 2; i++) {
+            assertThatThrownBy(() -> resiliencia.chamada("BatchGetItem", () -> {
+                throw erroDoDynamoDb(400, "ProvisionedThroughputExceededException");
+            })).isInstanceOf(VisaoConsolidadaSobrecarregadaException.class)
+                    .satisfies(e -> assertThat(((FonteDeOperacoesIndisponivelException) e).tenteNovamenteEm())
+                            .isPositive());
+        }
+
+        assertThat(circuitBreaker.getMetrics().getNumberOfFailedCalls()).isEqualTo(2);
+        assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.OPEN);
+    }
+
+    @Test
+    void sobrecargaLancadaDentroDaChamadaContaNoCircuitoESaiComo503() {
+        for (int i = 0; i < 2; i++) {
+            assertThatThrownBy(() -> resiliencia.chamada("BatchGetItem", () -> {
+                throw new VisaoConsolidadaSobrecarregadaException("UnprocessedKeys restantes");
+            })).isInstanceOf(VisaoConsolidadaSobrecarregadaException.class);
+        }
+
+        assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.OPEN);
+    }
+
+    @Test
+    void poolDeConexoesEsgotadoVira503SemContarNoCircuito() {
+        for (int i = 0; i < 5; i++) {
+            assertThatThrownBy(() -> resiliencia.chamada("BatchGetItem", () -> {
+                throw SdkClientException.builder()
+                        .message("Unable to execute HTTP request: Timeout waiting for connection from pool")
+                        .cause(new ConnectionRequestTimeoutException("Timeout deadline: 20 MILLISECONDS"))
+                        .build();
+            })).isInstanceOf(FonteDeOperacoesIndisponivelException.class)
+                    .satisfies(e -> assertThat(((FonteDeOperacoesIndisponivelException) e).tenteNovamenteEm())
+                            .isPositive());
+        }
+
+        assertThat(circuitBreaker.getMetrics().getNumberOfBufferedCalls()).isZero();
+    }
+
+    @Test
+    void falha5xxContaNoCircuito() {
+        for (int i = 0; i < 2; i++) {
+            assertThatThrownBy(() -> resiliencia.chamada("Query", () -> {
+                throw erroDoDynamoDb(500, "InternalServerError");
+            })).isExactlyInstanceOf(FalhaNaFonteDeOperacoesException.class);
+        }
+
+        assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.OPEN);
+    }
+
+    private static CircuitBreakerConfig circuito() {
+        var circuito = CircuitBreakerConfig.custom()
+                .slidingWindowSize(2).minimumNumberOfCalls(2).waitDurationInOpenState(CIRCUITO_ABERTO);
+        ResilienciaDynamoDb.classificarFalhas(circuito);
+        return circuito.build();
+    }
+
+    private static AwsServiceException erroDoDynamoDb(int status, String codigo) {
+        return DynamoDbException.builder()
+                .statusCode(status)
+                .awsErrorDetails(AwsErrorDetails.builder().errorCode(codigo).errorMessage("x").build())
+                .build();
+    }
+
+    private static void esperarOPrazoAcabar() {
+        while (!PrazoDaRequisicao.esgotado()) {
+            Thread.onSpinWait();
+        }
     }
 
     private Duration timeoutDaRequisicao() {

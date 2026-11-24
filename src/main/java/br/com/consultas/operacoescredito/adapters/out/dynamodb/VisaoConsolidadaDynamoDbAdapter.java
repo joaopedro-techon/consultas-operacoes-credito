@@ -7,6 +7,7 @@ import org.springframework.stereotype.Component;
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos;
 import br.com.consultas.operacoescredito.adapters.out.cache.ChaveDeBloco;
 import br.com.consultas.operacoescredito.config.observabilidade.Observacoes;
+import br.com.consultas.operacoescredito.application.port.out.FalhaNaFonteDeOperacoesException;
 import br.com.consultas.operacoescredito.application.port.out.FonteDeOperacoes;
 import br.com.consultas.operacoescredito.application.port.out.TempoEsgotadoNaFonteDeOperacoesException;
 import br.com.consultas.operacoescredito.config.resiliencia.PrazoDaRequisicao;
@@ -15,6 +16,7 @@ import br.com.consultas.operacoescredito.domain.CriterioConsulta;
 import br.com.consultas.operacoescredito.domain.OperacaoConsultada;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.KeysAndAttributes;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
@@ -28,12 +30,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Visão consolidada no DynamoDB (ADR-0001): um item por operação e bloco,
@@ -49,8 +53,10 @@ import java.util.concurrent.TimeoutException;
  * <p>
  * Resiliência ({@link ResilienciaDynamoDb}): a consulta passa pelos bulkheads do tipo de consulta e pelo rate
  * limiter; cada chamada ao SDK, pelo circuit breaker, com {@code apiCallTimeout} limitado ao que resta do
- * {@link PrazoDaRequisicao prazo da requisição}. A espera pelos lotes paralelos e a releitura das
- * {@code UnprocessedKeys} também respeitam o prazo: estourado, 504.
+ * {@link PrazoDaRequisicao prazo da requisição}. Os lotes paralelos de uma requisição são no máximo
+ * {@code consultas.dynamodb.max-lotes-simultaneos} ao mesmo tempo; a espera por vaga, a espera pelos lotes e a
+ * releitura das {@code UnprocessedKeys} também respeitam o prazo: estourado, 504. Item fora do formato
+ * ({@link VisaoConsolidadaInvalidaException}): 502.
  */
 @Component
 class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
@@ -61,6 +67,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     static final String ATRIBUTO_CLIENTE = "cpf_cnpj_cliente";
     static final String ATRIBUTO_CONTA = "conta_cliente";
     private static final String PREFIXO_SK = "SF#EXPAND#";
+    private static final String FONTE = "visão consolidada";
     /** Limite de chaves por {@code BatchGetItem} imposto pelo DynamoDB. */
     private static final int CHAVES_POR_LOTE = 100;
     private static final int MAX_LEITURAS_BATCH = 3;
@@ -78,6 +85,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     private final String tabela;
     private final String indiceCliente;
     private final String indiceConta;
+    private final int maxLotesSimultaneos;
     private final TextoDetalheCodec codec = new TextoDetalheCodec();
     /** Leva MDC (e demais contextos registrados) às virtual threads dos lotes. */
     private final ContextSnapshotFactory contexto = ContextSnapshotFactory.builder().build();
@@ -92,6 +100,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
         this.tabela = properties.tabela();
         this.indiceCliente = properties.indiceCliente();
         this.indiceConta = properties.indiceConta();
+        this.maxLotesSimultaneos = properties.maxLotesSimultaneos();
     }
 
     @Override
@@ -170,8 +179,10 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
                 requisicao.limit(limite.getAsInt() - operacoes.size());
             }
             var resposta = resiliencia.chamada("Query", () -> dynamoDb.query(requisicao.build()));
-            resposta.items().forEach(item -> operacoes.add(new OperacaoDoIndice(
-                    Long.parseLong(item.get(PK).n()), item.get(TEXTO_DETALHE).b().asByteArray())));
+            for (var item : resposta.items()) {
+                var idOperacao = numeroOperacao(item);
+                operacoes.add(new OperacaoDoIndice(idOperacao, textoDetalhe(item, idOperacao)));
+            }
             inicio = resposta.hasLastEvaluatedKey() && !resposta.lastEvaluatedKey().isEmpty()
                     ? resposta.lastEvaluatedKey()
                     : null;
@@ -220,7 +231,10 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
 
     /**
      * Lê os blocos na tabela base, em lotes de até 100 chaves. Mais de um lote: em paralelo, uma virtual thread
-     * por lote, com o contexto da requisição propagado.
+     * por lote, com o contexto da requisição propagado e no máximo {@code max-lotes-simultaneos} lotes em
+     * andamento por requisição (cada lote em andamento ocupa uma conexão do pool). O primeiro lote que falhar
+     * derruba a leitura inteira (sem resposta parcial) e interrompe os demais, mesmo que ainda não tenham terminado
+     * os anteriores a ele.
      */
     private Map<Long, Map<Bloco, byte[]>> lerDoDynamoDb(List<ChaveDeBloco> chavesDeBloco) {
         var chaves = new ArrayList<Map<String, AttributeValue>>(chavesDeBloco.size());
@@ -239,43 +253,84 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
             lotes.forEach(lote -> juntar(itens, lerLote(lote)));
             return itens;
         }
+        var vagas = new Semaphore(maxLotesSimultaneos);
+        var desistiu = new AtomicBoolean();
         try (var executor = ContextExecutorService.wrap(Executors.newVirtualThreadPerTaskExecutor(), contexto)) {
-            var futuros = lotes.stream().map(lote -> executor.submit(() -> lerLote(lote))).toList();
+            var concluidos = new ExecutorCompletionService<List<Map<String, AttributeValue>>>(executor);
+            lotes.forEach(lote -> concluidos.submit(() -> lerLoteNaVez(vagas, desistiu, lote)));
             try {
-                for (var futuro : futuros) {
-                    juntar(itens, aguardar(futuro));
+                for (int i = 0; i < lotes.size(); i++) {
+                    juntar(itens, proximoLote(concluidos));
                 }
             } catch (RuntimeException e) {
-                futuros.forEach(futuro -> futuro.cancel(true));
+                // Sem resposta parcial: interrompe os lotes em andamento (o circuito ignora as chamadas
+                // interrompidas) e desiste dos que esperam vaga
+                desistiu.set(true);
+                executor.shutdownNow();
                 throw e;
             }
         }
         return itens;
     }
 
-    /** Um {@code BatchGetItem}, relendo as {@code UnprocessedKeys} com backoff exponencial e jitter. */
+    /** Um lote quando houver vaga entre os {@code max-lotes-simultaneos} da requisição, sem esperar além do prazo. */
+    private List<Map<String, AttributeValue>> lerLoteNaVez(Semaphore vagas, AtomicBoolean desistiu,
+                                                          List<Map<String, AttributeValue>> lote)
+            throws InterruptedException {
+        var restante = PrazoDaRequisicao.restante();
+        if (restante.isEmpty()) {
+            vagas.acquire();
+        } else if (!vagas.tryAcquire(restante.get().toNanos(), TimeUnit.NANOSECONDS)) {
+            throw new TempoEsgotadoNaFonteDeOperacoesException(
+                    "Prazo da requisição esgotado antes de ler um lote do BatchGetItem");
+        }
+        try {
+            if (desistiu.get()) {
+                throw new CancellationException("Leitura da visão consolidada cancelada por outro lote");
+            }
+            return lerLote(lote);
+        } finally {
+            vagas.release();
+        }
+    }
+
+    /**
+     * Um {@code BatchGetItem}, relendo as {@code UnprocessedKeys} com backoff exponencial e jitter. Chaves que
+     * sobram depois da última leitura são throttling do DynamoDB: a última leitura falha dentro do circuit breaker
+     * (conta como falha) com {@link VisaoConsolidadaSobrecarregadaException} (503).
+     */
     private List<Map<String, AttributeValue>> lerLote(List<Map<String, AttributeValue>> chaves) {
         Map<String, KeysAndAttributes> pendentes = Map.of(tabela, KeysAndAttributes.builder()
                 .keys(chaves)
                 .projectionExpression(PK + ", " + SK + ", " + TEXTO_DETALHE)
                 .build());
         var itens = new ArrayList<Map<String, AttributeValue>>();
-        for (int leitura = 1; !pendentes.isEmpty(); leitura++) {
-            if (leitura > MAX_LEITURAS_BATCH) {
-                throw new VisaoConsolidadaIndisponivelException(
-                        "Chaves não processadas pelo DynamoDB após " + MAX_LEITURAS_BATCH + " leituras");
-            }
+        for (int leitura = 1; ; leitura++) {
             if (leitura > 1) {
                 esperar(leitura);
             }
+            var ultima = leitura == MAX_LEITURAS_BATCH;
             var requisicao = pendentes;
-            var resposta = resiliencia.chamada("BatchGetItem", () -> dynamoDb.batchGetItem(b -> b
-                    .requestItems(requisicao)
-                    .overrideConfiguration(resiliencia.noPrazo())));
+            var resposta = resiliencia.chamada("BatchGetItem", () -> {
+                var lida = dynamoDb.batchGetItem(b -> b
+                        .requestItems(requisicao)
+                        .overrideConfiguration(resiliencia.noPrazo()));
+                if (ultima && temNaoProcessadas(lida)) {
+                    throw new VisaoConsolidadaSobrecarregadaException(
+                            "Chaves não processadas pelo DynamoDB após " + MAX_LEITURAS_BATCH + " leituras");
+                }
+                return lida;
+            });
             itens.addAll(resposta.responses().getOrDefault(tabela, List.of()));
+            if (!temNaoProcessadas(resposta)) {
+                return itens;
+            }
             pendentes = resposta.unprocessedKeys();
         }
-        return itens;
+    }
+
+    private static boolean temNaoProcessadas(BatchGetItemResponse resposta) {
+        return resposta.hasUnprocessedKeys() && !resposta.unprocessedKeys().isEmpty();
     }
 
     /** Backoff com jitter antes de reler as chaves não processadas, só se o prazo comportar a espera e a leitura. */
@@ -289,37 +344,75 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
             Thread.sleep(espera);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new VisaoConsolidadaIndisponivelException("Leitura na visão consolidada interrompida");
+            throw new FalhaNaFonteDeOperacoesException("Leitura na " + FONTE + " interrompida", e);
         }
     }
 
-    /** Espera o lote no máximo pelo que resta do prazo da requisição (sem prazo: até o fim). */
-    private static <T> T aguardar(Future<T> futuro) {
+    /** Próximo lote concluído (em qualquer ordem), sem esperar além do prazo da requisição. */
+    private static <T> T proximoLote(ExecutorCompletionService<T> concluidos) {
         try {
             var restante = PrazoDaRequisicao.restante();
-            return restante.isPresent()
-                    ? futuro.get(restante.get().toNanos(), TimeUnit.NANOSECONDS)
-                    : futuro.get();
-        } catch (TimeoutException e) {
-            throw new TempoEsgotadoNaFonteDeOperacoesException(
-                    "Lote do BatchGetItem sem resposta no prazo da requisição", e);
+            if (restante.isEmpty()) {
+                return concluidos.take().get();
+            }
+            var concluido = concluidos.poll(restante.get().toNanos(), TimeUnit.NANOSECONDS);
+            if (concluido == null) {
+                throw new TempoEsgotadoNaFonteDeOperacoesException(
+                        "Lotes do BatchGetItem sem resposta no prazo da requisição");
+            }
+            return concluido.get();
         } catch (ExecutionException e) {
             if (e.getCause() instanceof RuntimeException causa) {
                 throw causa;
             }
-            throw new VisaoConsolidadaIndisponivelException("Falha na leitura da visão consolidada: " + e.getCause());
+            throw new FalhaNaFonteDeOperacoesException("Falha na leitura da " + FONTE, e.getCause());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new VisaoConsolidadaIndisponivelException("Leitura na visão consolidada interrompida");
+            throw new FalhaNaFonteDeOperacoesException("Leitura na " + FONTE + " interrompida", e);
         }
     }
 
     private static void juntar(Map<Long, Map<Bloco, byte[]>> destino, List<Map<String, AttributeValue>> itens) {
         for (var item : itens) {
-            var bloco = Bloco.valueOf(item.get(SK).s().substring(PREFIXO_SK.length()));
-            destino.computeIfAbsent(Long.parseLong(item.get(PK).n()), id -> new EnumMap<>(Bloco.class))
-                    .put(bloco, item.get(TEXTO_DETALHE).b().asByteArray());
+            var idOperacao = numeroOperacao(item);
+            destino.computeIfAbsent(idOperacao, id -> new EnumMap<>(Bloco.class))
+                    .put(bloco(item, idOperacao), textoDetalhe(item, idOperacao));
         }
+    }
+
+    private static long numeroOperacao(Map<String, AttributeValue> item) {
+        var valor = item.get(PK);
+        if (valor == null || valor.n() == null) {
+            throw new VisaoConsolidadaInvalidaException("Item da " + FONTE + " sem " + PK + " numérico");
+        }
+        try {
+            return Long.parseLong(valor.n());
+        } catch (NumberFormatException e) {
+            throw new VisaoConsolidadaInvalidaException("Item da " + FONTE + " com " + PK + " fora do formato", e);
+        }
+    }
+
+    private static Bloco bloco(Map<String, AttributeValue> item, long idOperacao) {
+        var valor = item.get(SK);
+        if (valor == null || valor.s() == null || !valor.s().startsWith(PREFIXO_SK)) {
+            throw new VisaoConsolidadaInvalidaException(
+                    "Item da operação " + idOperacao + " na " + FONTE + " sem " + SK + " " + PREFIXO_SK + "<BLOCO>");
+        }
+        try {
+            return Bloco.valueOf(valor.s().substring(PREFIXO_SK.length()));
+        } catch (IllegalArgumentException e) {
+            throw new VisaoConsolidadaInvalidaException(
+                    "Item da operação " + idOperacao + " na " + FONTE + " com bloco desconhecido na " + SK, e);
+        }
+    }
+
+    private static byte[] textoDetalhe(Map<String, AttributeValue> item, long idOperacao) {
+        var valor = item.get(TEXTO_DETALHE);
+        if (valor == null || valor.b() == null) {
+            throw new VisaoConsolidadaInvalidaException(
+                    "Item da operação " + idOperacao + " na " + FONTE + " sem " + TEXTO_DETALHE + " binário");
+        }
+        return valor.b().asByteArray();
     }
 
     private Object decodificar(byte[] textoDetalhe) {

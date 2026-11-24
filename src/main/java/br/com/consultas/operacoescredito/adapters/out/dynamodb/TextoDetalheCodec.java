@@ -22,13 +22,7 @@ class TextoDetalheCodec {
         try (var gzip = new GZIPInputStream(new ByteArrayInputStream(textoDetalhe))) {
             return jsonMapper.readValue(gzip, Object.class);
         } catch (IOException | JacksonException e) {
-            throw new TextoDetalheInvalidoException(e);
-        }
-    }
-
-    static class TextoDetalheInvalidoException extends RuntimeException {
-        TextoDetalheInvalidoException(Exception causa) {
-            super("texto_detalhe não é um JSON GZIP válido", causa);
+            throw new VisaoConsolidadaInvalidaException("texto_detalhe não é um JSON GZIP válido", e);
         }
     }
 }
