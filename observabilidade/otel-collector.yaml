@@ -62,6 +62,29 @@ processors:
         probabilistic:
           sampling_percentage: 10
 
+  # Defesa em profundidade (LGPD): a aplicação já mascara CPF/CNPJ e conta em todo span (MascaramentoSpanExporter);
+  # aqui o Collector mascara de novo atributos, eventos (exception.message/stacktrace) e status de qualquer span
+  # que chegue, inclusive de uma versão ou instrumentação que não mascare. Regras mais grossas que as da aplicação
+  # (sem dígito verificador): mascara o valor inteiro.
+  transform/mascaramento:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - set(attributes["cpf_cnpj"], "***") where attributes["cpf_cnpj"] != nil
+          - set(attributes["conta"], "***") where attributes["conta"] != nil
+          - replace_all_patterns(attributes, "value", "(?i)(/(?:clientes|contas)/)[A-Za-z0-9.-]+", "$$1***")
+          - replace_all_patterns(attributes, "value", "(?i)((?:cpf_cnpj|cpf|cnpj|conta)\"?\\s*(?:=[a-z]*=|=|:)\\s*\"?)[A-Za-z0-9./-]+", "$$1***")
+          - replace_all_patterns(attributes, "value", "\\b\\d{3}\\.?\\d{3}\\.?\\d{3}-?\\d{2}\\b", "***")
+          - replace_pattern(name, "(?i)(/(?:clientes|contas)/)[A-Za-z0-9.-]+", "$$1***")
+          - replace_pattern(status.message, "(?i)(/(?:clientes|contas)/)[A-Za-z0-9.-]+", "$$1***")
+          - replace_pattern(status.message, "\\b\\d{3}\\.?\\d{3}\\.?\\d{3}-?\\d{2}\\b", "***")
+      - context: spanevent
+        statements:
+          - replace_all_patterns(attributes, "value", "(?i)(/(?:clientes|contas)/)[A-Za-z0-9.-]+", "$$1***")
+          - replace_all_patterns(attributes, "value", "(?i)((?:cpf_cnpj|cpf|cnpj|conta)\"?\\s*(?:=[a-z]*=|=|:)\\s*\"?)[A-Za-z0-9./-]+", "$$1***")
+          - replace_all_patterns(attributes, "value", "\\b\\d{3}\\.?\\d{3}\\.?\\d{3}-?\\d{2}\\b", "***")
+
   batch:
     send_batch_size: 1024
     timeout: 5s
@@ -84,7 +107,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, tail_sampling, batch]
+      processors: [memory_limiter, transform/mascaramento, tail_sampling, batch]
       exporters: [otlp/jaeger]
     metrics:
       receivers: [otlp]

@@ -9,12 +9,14 @@ import io.github.resilience4j.common.retry.configuration.RetryConfigCustomizer;
 import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
 import io.github.resilience4j.retry.RetryRegistry;
 import io.micrometer.observation.ObservationRegistry;
+import org.apache.hc.client5.http.HttpRoute;
 import org.apache.hc.client5.http.config.ConnectionConfig;
 import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
 import org.apache.hc.client5.http.protocol.HttpClientContext;
+import org.apache.hc.core5.function.Resolver;
 import org.apache.hc.core5.util.TimeValue;
 import org.apache.hc.core5.util.Timeout;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -46,14 +48,10 @@ class FontePrimariaConfig {
     @Bean(name = HTTP_CLIENT, defaultCandidate = false)
     CloseableHttpClient fontePrimariaHttpClient(FontePrimariaProperties properties) {
         var pool = properties.pool();
-        var conexao = ConnectionConfig.custom()
-                .setConnectTimeout(Timeout.of(pool.timeoutConexao()))
-                .setTimeToLive(TimeValue.of(pool.ttl()))
-                .build();
         var gerenciador = PoolingHttpClientConnectionManagerBuilder.create()
                 .setMaxConnTotal(pool.maxConexoes())
                 .setMaxConnPerRoute(pool.maxConexoesPorRota())
-                .setDefaultConnectionConfig(conexao)
+                .setConnectionConfigResolver(conexaoNoPrazo(pool))
                 .build();
         var requisicao = RequestConfig.custom()
                 .setConnectionRequestTimeout(Timeout.of(pool.timeoutObterConexao()))
@@ -82,7 +80,10 @@ class FontePrimariaConfig {
         return RetryConfigCustomizer.of(ResilienciaFontePrimaria.NOME, retry -> retry.retryOnException(retentavelNoPrazo));
     }
 
-    /** O circuito conta só falhas do mainframe; chamadas interrompidas pelo próprio fan-out não contam. */
+    /**
+     * O circuito conta só falhas do mainframe; chamadas interrompidas pelo próprio fan-out, timeouts encurtados
+     * pelo prazo da requisição e recusas do rate limiter e do bulkhead não contam (ADR-0009).
+     */
     @Bean
     CircuitBreakerConfigCustomizer circuitBreakerDaFontePrimaria() {
         return CircuitBreakerConfigCustomizer.of(ResilienciaFontePrimaria.NOME, circuito -> circuito
@@ -109,17 +110,31 @@ class FontePrimariaConfig {
                 retryRegistry.retry(ResilienciaFontePrimaria.NOME),
                 circuitBreakerRegistry.circuitBreaker(ResilienciaFontePrimaria.NOME),
                 rateLimiterRegistry.rateLimiter(ResilienciaFontePrimaria.NOME),
-                bulkheadRegistry.bulkhead(ResilienciaFontePrimaria.NOME));
+                bulkheadRegistry.bulkhead(ResilienciaFontePrimaria.NOME),
+                bulkheadRegistry.bulkhead(ResilienciaFontePrimaria.BULKHEAD_CLIENTE_CONTA));
         return new FontePrimariaTrancodeAdapter(gateway, LayoutsTrancode.carregar(resourceLoader, properties.layouts()),
                 observationRegistry, resiliencia, properties.fanOut().maxChamadasSimultaneas());
+    }
+
+    /**
+     * Configuração de cada conexão nova, resolvida na thread da requisição: o timeout para abrir a conexão TCP
+     * também nunca passa do que resta do prazo. Com o padrão (50 ms) bem abaixo do menor prazo (OPERACAO,
+     * 150 ms), um host inalcançável estoura o timeout de conexão (falha do mainframe, conta no circuito e é
+     * retentada) antes de o prazo cortar a chamada.
+     */
+    static Resolver<HttpRoute, ConnectionConfig> conexaoNoPrazo(FontePrimariaProperties.Pool pool) {
+        return rota -> ConnectionConfig.custom()
+                .setConnectTimeout(Timeout.of(PrazoDaRequisicao.limitar(pool.timeoutConexao())))
+                .setTimeToLive(TimeValue.of(pool.ttl()))
+                .build();
     }
 
     /**
      * Fábrica de requisições em que a espera por conexão do pool e pela resposta de cada tentativa nunca passa do
      * que resta do prazo da requisição: o 504 sai no prazo mesmo com o mainframe lento.
      */
-    private static HttpComponentsClientHttpRequestFactory requisicoesNoPrazo(CloseableHttpClient httpClient,
-                                                                              FontePrimariaProperties.Pool pool) {
+    static HttpComponentsClientHttpRequestFactory requisicoesNoPrazo(CloseableHttpClient httpClient,
+                                                                     FontePrimariaProperties.Pool pool) {
         var fabrica = new HttpComponentsClientHttpRequestFactory(httpClient);
         fabrica.setHttpContextFactory((metodo, uri) -> {
             if (PrazoDaRequisicao.restante().isEmpty()) {

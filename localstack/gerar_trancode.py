@@ -22,7 +22,8 @@ Regras de codificação (inversas das do parser da API):
 - registro: campos de posição fixa (inicio a partir de 1, relativo ao registro), seguidos das listas
   aninhadas na ordem do layout;
 - lista: prefixo de 3 dígitos com a quantidade de itens, seguido dos registros;
-- numero: zeros à esquerda; decimal: casas implícitas (formato = casas), zeros à esquerda;
+- numero: zeros à esquerda; decimal: casas implícitas (formato = casas), zeros à esquerda. Sem sinal: valor
+  negativo, ou decimal com mais casas que o formato, interrompe a geração (nada é truncado em silêncio);
 - data/data_hora: no formato do layout; booleano: formato "SN" (verdadeiro, falso);
 - texto: alinhado à esquerda com espaços; null: o campo inteiro em espaços.
 """
@@ -51,16 +52,28 @@ def padrao_strftime(formato):
     return formato
 
 
+def digitos_sem_sinal(campo, numero, valor):
+    """Os layouts não têm posição de sinal: número negativo não tem codificação (e viraria 000-123)."""
+    if numero < 0:
+        raise ValueError(f"{campo['campo']}: valor {valor!r} negativo; o layout não define sinal")
+    return str(numero)
+
+
 def codificar_campo(campo, valor):
     tamanho = campo["tamanho"]
     if valor is None:
         return " " * tamanho
     tipo = campo["tipo"]
     if tipo == "numero":
-        texto = str(int(valor)).rjust(tamanho, "0")
+        if Decimal(valor) != int(valor):
+            raise ValueError(f"{campo['campo']}: valor {valor!r} não é inteiro")
+        texto = digitos_sem_sinal(campo, int(valor), valor).rjust(tamanho, "0")
     elif tipo == "decimal":
         casas = int(campo["formato"])
-        texto = str(int(Decimal(valor).scaleb(casas))).rjust(tamanho, "0")
+        escalado = Decimal(valor).scaleb(casas)
+        if escalado != escalado.to_integral_value():
+            raise ValueError(f"{campo['campo']}: valor {valor!r} tem mais de {casas} casas decimais")
+        texto = digitos_sem_sinal(campo, int(escalado), valor).rjust(tamanho, "0")
     elif tipo in ("data", "data_hora"):
         formato = padrao_strftime(campo["formato"])
         leitura = dt.date.fromisoformat if tipo == "data" else dt.datetime.fromisoformat
