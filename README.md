@@ -22,6 +22,7 @@ Organização hexagonal em `br.com.consultas.operacoescredito`:
 | `application` | Caso de uso `ConsultarOperacoesUseCase` e porta de saída `FonteDeOperacoes` (sem framework) |
 | `adapters.in.web` | Controller, validação dos parâmetros, Problem Details |
 | `adapters.out.dynamodb` | Visão consolidada (ADR-0001) |
+| `adapters.out.cache` | Cache por bloco da visão consolidada no Valkey (ADR-0002) |
 | `config` | Ligação dos casos de uso às portas; leitura do catálogo de campos |
 
 As regras de dependência são verificadas pelo ArchUnit (`ArquiteturaTest`).
@@ -43,7 +44,7 @@ x-blocos-indisponiveis: plano,saldo
 - `expand`: blocos separados por vírgula, com o nome canônico (o mesmo da chave no JSON e do sufixo da SK):
   `operacao`, `originacao`, `componentes`, `parcelas`, `amortizacoes`, `recebimentos`, `plano`, `saldo`,
   `controles_iof`. `operacao` e `originacao` vêm sempre; repetições e espaços em volta dos nomes são ignorados.
-- Só os blocos pedidos são lidos do DynamoDB (um `BatchGetItem` com uma chave por bloco).
+- Só os blocos pedidos e fora do cache são lidos do DynamoDB (um `BatchGetItem` com uma chave por bloco).
 - Bloco pedido e ainda ausente na visão consolidada: chave com `null` e o bloco listado em
   `x-blocos-indisponiveis` (ordem canônica). Blocos-lista vazios (`[]`) não são indisponíveis.
 - `fields`: `bloco.campo` separados por vírgula, com ponto também para campos aninhados
@@ -79,6 +80,23 @@ de contratação, até `limite_operacoes` (ausente: todas). A leitura segue o AD
 (`ScanIndexForward=false`, `Limit` = limite, paginada), que já traz o bloco `operacao`, e `BatchGetItem` de
 `originacao` + blocos pedidos em lotes de até 100 chaves, em paralelo (uma virtual thread por lote, com o MDC
 propagado), relendo `UnprocessedKeys` com backoff.
+
+## Cache por bloco (Valkey)
+
+Só na visão consolidada; a rota da fonte primária nunca lê nem grava cache (ADR-0002).
+
+- Chave `op:{id_operacao}:{bloco}` (nome canônico do bloco); valor = `texto_detalhe` em GZIP exatamente como veio
+  do DynamoDB (sem recomprimir); TTL `consultas.cache.ttl` (default 5 min).
+- Por requisição, um `MGET` com todas as chaves operação × bloco a ler da tabela base; só os ausentes vão ao
+  `BatchGetItem`, e os encontrados são gravados em seguida (um `EVAL` com um `SET ... PX` por bloco). Ex.: depois
+  de `expand=parcelas,amortizacoes`, uma chamada `expand=parcelas,saldo` só lê `saldo` no DynamoDB.
+- Vale para `OPERACAO`, `CLIENTE` e `CONTA`. A `Query` no GSI (a lista de operações do cliente/conta, que já traz o
+  bloco `operacao`) **não** é cacheada: operação nova aparece na hora. Bloco indisponível não é cacheado.
+- Fail-open: o Valkey é só otimização. Timeout curto do cliente (`spring.data.redis.timeout`, 10 ms) e circuit
+  breaker próprio (`resilience4j.circuitbreaker.instances.valkey`); erro, lentidão ou circuito aberto = "nada em
+  cache" e a consulta segue no DynamoDB com a mesma resposta. O Valkey não entra no health/readiness.
+- Cliente Lettuce (Spring Data Redis) com uma conexão compartilhada e multiplexada; sem pool.
+- `consultas.cache.habilitado=false` desliga o cache (toda leitura vai ao DynamoDB).
 
 ## Fonte primária
 
@@ -162,7 +180,9 @@ trocar para Datadog é trocar o exporter em `observabilidade/otel-collector.yaml
 | --- | --- |
 | `http.server.requests` (timer) | `consumidor`, `tipo_consulta` (`nenhum`/`invalido` quando ausente/inválido), `rota`, `status`, `uri` (template), `method`, `outcome`, `exception` |
 | `consultas.blocos` (contador, um incremento por bloco pedido) | `bloco`, `consumidor`, `tipo_consulta`, `rota`, `status` |
-| `consultas.dependencia` (timer, um por chamada externa) | `dependencia` (`dynamodb`, `fonte_primaria`), `operacao` (`BatchGetItem`, `Query`... no DynamoDB; o bloco na fonte primária), `indice` (GSI ou `nenhum`, só DynamoDB) |
+| `consultas.dependencia` (timer, um por chamada externa) | `dependencia` (`dynamodb`, `fonte_primaria`, `valkey`), `operacao` (`BatchGetItem`, `Query`... no DynamoDB; o bloco na fonte primária; `MGET`/`SET` no Valkey), `indice` (GSI ou `nenhum`, só DynamoDB) |
+| `consultas.cache` (contador, um incremento por bloco procurado no cache) | `bloco`, `resultado` (`hit`, `miss`; Valkey fora ou circuito aberto conta `miss`) |
+| `resilience4j.circuitbreaker.*` (estado, chamadas) | `name` (`valkey`), `state`/`kind` |
 | `consultas.etapa` (timer, um por etapa interna) | `etapa` (`consulta_gsi`, `batch`, `fan_out`, `filtro`); `indice` em `consulta_gsi` |
 
 - `x-consumidor` vira tag como veio (id da API key no gateway); fora de `[A-Za-z0-9._-]{1,64}` vira `invalido`.
@@ -170,7 +190,8 @@ trocar para Datadog é trocar o exporter em `observabilidade/otel-collector.yaml
 - Spans: um por requisição HTTP (com `consumidor`, `tipo_consulta`, `rota`, `correlation_id` e os
   identificadores da consulta), com filhos por etapa e por chamada externa. `traceparent` (W3C) recebido
   continua o trace e segue para o gateway da fonte primária.
-  - OPERACAO na visão consolidada: `dynamodb BatchGetItem` direto sob o span HTTP.
+  - OPERACAO na visão consolidada: `valkey MGET`, `dynamodb BatchGetItem` (só com blocos fora do cache) e
+    `valkey SET` direto sob o span HTTP.
   - CLIENTE/CONTA: `consulta_gsi` (com os `dynamodb Query`) e `batch` (com os `dynamodb BatchGetItem` dos lotes).
   - Fonte primária: `fan_out` com um `fonte_primaria <bloco>` por bloco pedido; 404 (bloco inexistente) não é erro.
   - `filtro`, quando há `filter`.
@@ -198,6 +219,7 @@ O `docker-compose.yml` sobe:
 - **LocalStack Community `4.14.0`**, a última tag que roda sem auth token (ADR-0003). Uso exclusivo em
   desenvolvimento local: a tag não recebe patches de segurança.
 - **WireMock `3.13.2`** (porta 8089), simulando o gateway do mainframe com os stubs de `wiremock/mappings`.
+- **Valkey `9.0.8-alpine`** (porta 6379), cache por bloco, sem persistência.
 - **app**, construída pelo `Dockerfile`.
 - **OpenTelemetry Collector** `otel/opentelemetry-collector-contrib:0.165.0` (OTLP em `4317`/`4318`).
 - **Jaeger v2** `jaegertracing/jaeger:2.23.0`: traces em http://localhost:16686.
@@ -251,6 +273,12 @@ CONSULTAS_DYNAMODB_CREDENCIAIS_ACCESS_KEY_ID=test CONSULTAS_DYNAMODB_CREDENCIAIS
 | `consultas.dynamodb.regiao` | `AWS_REGION` | `sa-east-1` |
 | `consultas.dynamodb.endpoint` | `CONSULTAS_DYNAMODB_ENDPOINT` | vazio (endpoint da AWS) |
 | `consultas.dynamodb.credenciais.*` | `CONSULTAS_DYNAMODB_CREDENCIAIS_ACCESS_KEY_ID` / `..._SECRET_ACCESS_KEY` | vazio (cadeia padrão do SDK) |
+| `consultas.cache.habilitado` | `CONSULTAS_CACHE_HABILITADO` | `true` |
+| `consultas.cache.ttl` | `CONSULTAS_CACHE_TTL` | `5m` |
+| `spring.data.redis.host` / `.port` (Valkey) | `CONSULTAS_VALKEY_HOST` / `CONSULTAS_VALKEY_PORTA` | `localhost` / `6379` |
+| `spring.data.redis.timeout` (comando no Valkey) | `CONSULTAS_VALKEY_TIMEOUT` | `10ms` |
+| `spring.data.redis.connect-timeout` | — | `100ms` |
+| `resilience4j.circuitbreaker.instances.valkey.*` | — | janela de 20 chamadas, mínimo 10, abre com 50% de falhas, 5 s aberto, 3 chamadas em meio-aberto |
 | `consultas.fonte-primaria.url` | `CONSULTAS_FONTE_PRIMARIA_URL` | `http://localhost:8089` |
 | `consultas.fonte-primaria.layouts` | — | `classpath:trancode/layouts/` |
 | `consultas.fonte-primaria.pool.*` | — | `max-conexoes` 50, `max-conexoes-por-rota` 50, `ttl` 5m, `keep-alive` 30s, `timeout-conexao` 200ms, `timeout-obter-conexao` 50ms, `timeout-resposta` 1s |
@@ -269,5 +297,9 @@ Requer JDK 25 e Docker. `verify` roda:
 - testes HTTP de caixa-preta `*IT` (Failsafe), com a aplicação inteira e o LocalStack via Testcontainers,
   usando a mesma imagem, o mesmo script de init e a mesma massa do docker-compose, e o WireMock com os
   mesmos stubs de trancode (`FontePrimariaIT` compara as duas rotas para cada operação da massa).
+  O cache fica desligado nos testes (`src/test/resources/application.properties`), exceto no `CacheIT`, que sobe
+  o Valkey atrás de um Toxiproxy (`CacheContainers`): altera itens no DynamoDB depois da primeira chamada para
+  saber de onde veio cada bloco, lê o Valkey direto pela porta do container e derruba ou atrasa o proxy para
+  verificar o fail-open e o circuit breaker.
 
 O CI (`.github/workflows/ci.yml`) executa `./mvnw -B verify` e constrói a imagem Docker.
