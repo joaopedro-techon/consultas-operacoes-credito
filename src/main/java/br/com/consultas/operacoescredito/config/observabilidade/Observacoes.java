@@ -15,7 +15,7 @@ import java.util.Objects;
  *     Métrica {@code consultas.etapa}, tag {@code etapa}.</li>
  * </ul>
  * Só valores de baixa cardinalidade em {@code lowCardinalityKeyValue}; identificadores vão em
- * {@code highCardinalityKeyValue} (apenas no span, mascarados pelo {@link MascaramentoSpanFilter}).
+ * {@code highCardinalityKeyValue} (apenas no span, mascarados pelo {@link MascaramentoSpanExporter}).
  */
 public final class Observacoes {
 
