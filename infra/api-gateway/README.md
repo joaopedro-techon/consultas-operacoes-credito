@@ -25,7 +25,8 @@ Terraform da porta de entrada da API de Consulta de Operações de Crédito. Nã
 ```powershell
 cd infra/api-gateway
 Copy-Item terraform.tfvars.example terraform.tfvars   # git-ignored; ajuste região, URL e consumidores
-terraform init                                         # ou: terraform init -backend-config=backend.hcl (estado remoto em S3)
+Copy-Item backend.hcl.example backend.hcl             # git-ignored; state em S3, chave consultas-operacoes-credito/api-gateway/...
+terraform init -backend-config=backend.hcl             # state local de antes: acrescente -migrate-state
 terraform plan -out tfplan
 terraform apply tfplan
 terraform output invoke_url

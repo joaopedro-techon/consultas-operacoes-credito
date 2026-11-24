@@ -56,11 +56,14 @@ Cluster ECS, VPC/subnets, ALB e listener HTTPS, security groups (tasks aceitando
 ```powershell
 cd infra/ecs
 Copy-Item terraform.tfvars.example terraform.tfvars   # git-ignored; ajuste ARNs, imagem e ambiente
-terraform init                                         # ou: terraform init -backend-config=backend.hcl
+Copy-Item backend.hcl.example backend.hcl             # git-ignored; ajuste o bucket (a chave já é a deste repositório)
+terraform init -backend-config=backend.hcl
 terraform plan -out tfplan
 terraform apply tfplan
 terraform output
 ```
+
+**State.** O state fica em S3 (`backend "s3" {}` em `versions.tf`, com lock nativo `use_lockfile`), na chave `consultas-operacoes-credito/ecs/terraform.tfstate`. O repositório do mainframe usa a chave dele (`consultas-operacoes-credito-mainframe/ecs/...`). **Nunca aponte um repositório para a chave do outro**: os nomes de recurso são iguais, e um `apply` com o state errado destruiria o serviço do outro repositório. Se você já tem um state local de antes, leve-o para o S3 com `terraform init -backend-config=backend.hcl -migrate-state` e só então faça o `state rm` da seção "State de antes da separação". Com o `backend "s3"` declarado, o Terraform não roda comandos de state antes do `init`. O que importa é que nenhum `plan`/`apply` aconteça antes do `state rm`.
 
 Validação local sem credenciais (a mesma da CI):
 
