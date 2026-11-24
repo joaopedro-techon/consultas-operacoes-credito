@@ -22,6 +22,11 @@ public class VisaoConsolidadaContainers {
 
     @Bean
     LocalStackContainer localStack() {
+        return novoLocalStack();
+    }
+
+    /** LocalStack com a tabela, os GSIs e a massa da visão consolidada (também usado atrás do Toxiproxy). */
+    static LocalStackContainer novoLocalStack() {
         return new LocalStackContainer(DockerImageName.parse(IMAGEM_LOCALSTACK))
                 .withEnv("SERVICES", "dynamodb")
                 .withEnv("CONSULTAS_DYNAMODB_TABELA", "operacoes-credito")
