@@ -17,7 +17,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class RegistrarConsumoServiceTest {
 
-    private static final byte[] SEGREDO = "segredo".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] SEGREDO = "segredo-de-teste-com-pelo-menos-32-bytes".getBytes(StandardCharsets.UTF_8);
+    private static final String CPF_PONTUADO = "529.982.247-25";
+    private static final String CNPJ_PONTUADO = "12.ABC.345/01DE-35";
     private static final String CPF = "52998224725";
     private static final String CNPJ = "12ABC34501DE35";
     private static final String CONTA = "434115000065874";
@@ -28,16 +30,18 @@ class RegistrarConsumoServiceTest {
 
     @Test
     void hmacSha256EmHexMinusculo() {
-        // RFC 4231, caso 2: chave "Jefe"
-        var rfc = new PseudonimizadorHmac("Jefe".getBytes(StandardCharsets.UTF_8));
+        // RFC 4231, caso 6: chave de 131 bytes 0xaa
+        var chave = new byte[131];
+        java.util.Arrays.fill(chave, (byte) 0xaa);
+        var rfc = new PseudonimizadorHmac(chave);
 
-        assertThat(rfc.hmac("what do ya want for nothing?"))
-                .isEqualTo("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        assertThat(rfc.hmac("Test Using Larger Than Block-Size Key - Hash Key First"))
+                .isEqualTo("60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
     }
 
     @Test
     void mesmoValorDaSempreOMesmoHmacEOutroSegredoDaOutro() {
-        var outro = new PseudonimizadorHmac("outro".getBytes(StandardCharsets.UTF_8));
+        var outro = new PseudonimizadorHmac("outro-segredo-de-teste-com-32-bytes-ou-mais".getBytes(StandardCharsets.UTF_8));
 
         assertThat(hmac.hmac(CPF)).isEqualTo(hmac.hmac(CPF)).isNotEqualTo(outro.hmac(CPF)).hasSize(64);
     }
@@ -45,6 +49,50 @@ class RegistrarConsumoServiceTest {
     @Test
     void segredoVazioNaoEAceito() {
         assertThatThrownBy(() -> new PseudonimizadorHmac(new byte[0])).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void segredoComMenosDe32BytesNaoEAceito() {
+        assertThatThrownBy(() -> new PseudonimizadorHmac(new byte[31]))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("32 bytes");
+        assertThat(new PseudonimizadorHmac(new byte[32]).hmac("x")).hasSize(64);
+    }
+
+    @Test
+    void documentoEContaComPontuacaoDaoOMesmoHmacDaFormaSemPontuacao() {
+        service.registrar(consumo(CPF_PONTUADO, "43411-5000065874", null));
+
+        assertThat(publicados).singleElement().satisfies(evento -> {
+            assertThat(evento.cpfCnpjHmac()).isEqualTo(hmac.hmac(CPF));
+            assertThat(evento.contaHmac()).isEqualTo(hmac.hmac(CONTA));
+        });
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            operacao.cpf_cnpj==529.982.247-25                      | operacao.cpf_cnpj=={52998224725}
+            operacao.cpf_cnpj=in=('529.982.247-25',12.ABC.345/01DE-35) | operacao.cpf_cnpj=in=({52998224725},{12ABC34501DE35})
+            originacao.conta==43411-5000065874                     | originacao.conta=={434115000065874}
+            operacao.CPF_CNPJ==52998224725                         | operacao.CPF_CNPJ=={52998224725}
+            operacao.situacao_operacao_credito==529.982.247-25     | operacao.situacao_operacao_credito=={52998224725}
+            operacao.situacao_operacao_credito=='12.ABC.345/01DE-35' | operacao.situacao_operacao_credito=='{12ABC34501DE35}'
+            operacao.situacao_operacao_credito==529982247-25       | operacao.situacao_operacao_credito=={52998224725}
+            """)
+    void documentoComPontuacaoNoFiltroViraOHmacDaFormaSemPontuacao(String filtro, String esperado) {
+        var pseudonimizado = hmac.filtro(filtro);
+
+        assertThat(pseudonimizado).isEqualTo(comHmac(esperado));
+        assertThat(pseudonimizado).doesNotContain(CPF, CPF_PONTUADO, CNPJ, CNPJ_PONTUADO, CONTA);
+    }
+
+    @Test
+    void eventoComDocumentoPontuadoNoFiltroNaoTemODocumentoEmNenhumaForma() {
+        service.registrar(consumo(null, null, "operacao.cpf_cnpj==" + CPF_PONTUADO
+                + ",parcelas.situacao_parcela==" + CNPJ_PONTUADO));
+
+        assertThat(publicados).singleElement().satisfies(evento -> assertThat(evento.toString())
+                .doesNotContain(CPF, CPF_PONTUADO, CNPJ, CNPJ_PONTUADO, "529.982", "982.247"));
     }
 
     @Test

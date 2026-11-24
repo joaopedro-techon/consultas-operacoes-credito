@@ -16,6 +16,9 @@ public final class RegistrarConsumoService implements RegistrarConsumoUseCase {
     private final PublicadorDeEventosDeConsumo publicador;
     private final PseudonimizadorHmac pseudonimizador;
 
+    /**
+     * @throws IllegalArgumentException segredo do HMAC com menos de 32 bytes
+     */
     public RegistrarConsumoService(PublicadorDeEventosDeConsumo publicador, byte[] segredoHmac) {
         this.publicador = Objects.requireNonNull(publicador, "publicador");
         this.pseudonimizador = new PseudonimizadorHmac(segredoHmac);
@@ -32,8 +35,8 @@ public final class RegistrarConsumoService implements RegistrarConsumoUseCase {
                 consumo.rota(),
                 consumo.tipoConsulta(),
                 consumo.idOperacao(),
-                pseudonimizador.hmac(consumo.cpfCnpj()),
-                pseudonimizador.hmac(consumo.conta()),
+                pseudonimizador.hmacDeDadoPessoal(consumo.cpfCnpj()),
+                pseudonimizador.hmacDeDadoPessoal(consumo.conta()),
                 consumo.blocosSolicitados(),
                 consumo.camposSolicitados(),
                 pseudonimizador.filtro(consumo.filtro()),

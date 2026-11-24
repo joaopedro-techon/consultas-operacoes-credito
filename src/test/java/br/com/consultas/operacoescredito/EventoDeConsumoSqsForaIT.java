@@ -30,7 +30,7 @@ import static org.awaitility.Awaitility.await;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "consultas.eventos.habilitado=true",
-        "consultas.eventos.segredo-hmac=segredo-de-teste",
+        "consultas.eventos.segredo-hmac=segredo-de-teste-com-pelo-menos-32-bytes",
         "consultas.eventos.fila.capacidade=3",
         "consultas.eventos.fila.intervalo-envio=50ms",
         "consultas.eventos.fila.tempo-maximo-drenagem=1s",
