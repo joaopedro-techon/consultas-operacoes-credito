@@ -21,6 +21,8 @@ import java.time.Duration;
  *                                para que um timeout do Valkey nunca seja encurtado pelo prazo
  * @param maxGravacoesSimultaneas gravações em andamento (fora da requisição, em virtual threads); com todas as
  *                                vagas ocupadas, a gravação nova é descartada (o cache é só otimização)
+ * @param ttlCustodia             tempo de vida da custódia de uma operação no cache de custódia (ADR-0012); bem
+ *                                maior que {@code ttl}, para que blocos em cache quase sempre tenham a custódia
  */
 @ConfigurationProperties("consultas.cache")
 public record CacheProperties(@DefaultValue("true") boolean habilitado,
@@ -28,11 +30,15 @@ public record CacheProperties(@DefaultValue("true") boolean habilitado,
                               @DefaultValue("100") int chavesPorComando,
                               @DefaultValue("500") int maxChavesPorConsulta,
                               @DefaultValue("20ms") Duration prazoMinimoRestante,
-                              @DefaultValue("32") int maxGravacoesSimultaneas) {
+                              @DefaultValue("32") int maxGravacoesSimultaneas,
+                              @DefaultValue("24h") Duration ttlCustodia) {
 
     public CacheProperties {
         if (ttl.isNegative() || ttl.isZero()) {
             throw new IllegalArgumentException("consultas.cache.ttl deve ser positivo: " + ttl);
+        }
+        if (ttlCustodia.isNegative() || ttlCustodia.isZero()) {
+            throw new IllegalArgumentException("consultas.cache.ttl-custodia deve ser positivo: " + ttlCustodia);
         }
         if (chavesPorComando < 1) {
             throw new IllegalArgumentException("consultas.cache.chaves-por-comando deve ser ao menos 1");

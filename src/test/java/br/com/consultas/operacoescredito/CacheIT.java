@@ -155,7 +155,8 @@ class CacheIT {
     @Test
     void cacheGuardaPorOperacaoEBlocoOGzipComoVeioDoDynamoDbComTtl() {
         consultarOperacao("100000001", TODOS_OS_BLOCOS);
-        await().atMost(Duration.ofSeconds(5)).until(() -> valkey.sync().dbsize() == 9);
+        // 9 blocos + a custódia da operação
+        await().atMost(Duration.ofSeconds(5)).until(() -> valkey.sync().dbsize() == 10);
 
         for (var bloco : List.of("operacao", "originacao", "componentes", "parcelas", "amortizacoes", "recebimentos",
                 "plano", "saldo", "controles_iof")) {
@@ -164,7 +165,21 @@ class CacheIT {
                     .isEqualTo(textoDetalheNoDynamoDb(100000001L, bloco.toUpperCase()));
             assertThat(valkey.sync().pttl(chave)).as(bloco).isBetween(TTL_PADRAO_MS - 60_000, TTL_PADRAO_MS);
         }
-        assertThat(valkey.sync().dbsize()).isEqualTo(9);
+        assertThat(valkey.sync().get(chave("custodia:100000001"))).asString(StandardCharsets.UTF_8).isEqualTo("SF");
+        assertThat(valkey.sync().pttl(chave("custodia:100000001")))
+                .isBetween(Duration.ofHours(24).toMillis() - 60_000, Duration.ofHours(24).toMillis());
+        assertThat(valkey.sync().dbsize()).isEqualTo(10);
+    }
+
+    @Test
+    void custodiaEmCacheQueNaoTemMaisAOperacaoEEsquecidaERedescoberta() {
+        // A operação "migrou": o cache aponta a F5, mas ela está na SF
+        valkey.sync().set(chave("custodia:100000002"), chave("F5"));
+
+        dados(consultarOperacao("100000002", "parcelas"));
+
+        await().atMost(Duration.ofSeconds(5)).until(() ->
+                "SF".equals(new String(valkey.sync().get(chave("custodia:100000002")), StandardCharsets.UTF_8)));
     }
 
     @Test
@@ -210,9 +225,9 @@ class CacheIT {
     }
 
     @Test
-    void rotaDaFontePrimariaNaoUsaCache() {
+    void rotaDaFontePrimariaNaoUsaOCacheDeBlocosMasUsaODeCustodia() {
         consultarOperacao("100000002", "parcelas");
-        aguardarNoCache("op:100000002:parcelas");
+        aguardarNoCache("op:100000002:parcelas", "custodia:100000002");
         var chamadasAntes = chamadasAoGateway("100000002");
 
         client.get().uri(ROTA_FONTE_PRIMARIA + "?id_operacao=100000002&expand=parcelas,saldo")
@@ -220,7 +235,8 @@ class CacheIT {
                 .exchange()
                 .expectStatus().isOk();
 
-        // Um GET por bloco no gateway, mesmo com operacao, originacao e parcelas em cache; nada gravado
+        // Um GET por bloco no gateway, mesmo com operacao, originacao e parcelas em cache, só na custódia lembrada
+        // (sem a descoberta nas 4 custódias); nenhum bloco gravado
         assertThat(chamadasAoGateway("100000002") - chamadasAntes).isEqualTo(4);
         assertThat(valkey.sync().exists(chave("op:100000002:saldo"))).isZero();
     }
@@ -340,7 +356,18 @@ class CacheIT {
     }
 
     private static Map<String, AttributeValue> chaveDynamoDb(long idOperacao, String bloco) {
-        return Map.of(PK, AttributeValue.fromN(Long.toString(idOperacao)), SK, AttributeValue.fromS("SF#EXPAND#" + bloco));
+        return Map.of(PK, AttributeValue.fromN(Long.toString(idOperacao)),
+                SK, AttributeValue.fromS(custodia(idOperacao) + "#EXPAND#" + bloco));
+    }
+
+    /** Custódia de cada operação da massa (ADR-0012); a 100000006 está na SF e na NSF, e vale a NSF. */
+    private static String custodia(long idOperacao) {
+        return switch ((int) (idOperacao - 100000000L)) {
+            case 3, 7 -> "F5";
+            case 4 -> "OD";
+            case 5, 6 -> "NSF";
+            default -> "SF";
+        };
     }
 
     private static byte[] gzip(String json) {
@@ -380,7 +407,8 @@ class CacheIT {
         var resposta = RestClient.create(FontePrimariaContainers.urlWireMock(wireMock))
                 .post().uri("/__admin/requests/count")
                 .contentType(MediaType.APPLICATION_JSON)
-                .body(Map.of("method", "GET", "urlPathPattern", "/mainframe/operacoes/" + idOperacao + "/blocos/.*"))
+                .body(Map.of("method", "GET", "urlPathPattern",
+                        "/mainframe/custodias/[A-Z0-9]+/operacoes/" + idOperacao + "/blocos/.*"))
                 .retrieve()
                 .body(Map.class);
         return ((Number) resposta.get("count")).intValue();

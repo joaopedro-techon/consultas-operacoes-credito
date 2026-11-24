@@ -153,7 +153,7 @@ class SelecaoDeCamposIT {
         consultar("100000001", "", "")
                 .expectStatus().isOk()
                 .expectBody()
-                .jsonPath("$.data[0].operacao.length()").isEqualTo(5)
+                .jsonPath("$.data[0].operacao.length()").isEqualTo(6)
                 .jsonPath("$.data[0].originacao.length()").isEqualTo(3);
     }
 

@@ -1,6 +1,7 @@
 package br.com.consultas.operacoescredito.config;
 
 import br.com.consultas.operacoescredito.domain.Bloco;
+import br.com.consultas.operacoescredito.domain.Custodia;
 import br.com.consultas.operacoescredito.domain.catalogo.Campo;
 import br.com.consultas.operacoescredito.domain.catalogo.CatalogoDeCampos;
 import br.com.consultas.operacoescredito.domain.catalogo.EstruturaBloco;
@@ -28,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Cada payload da massa local ({@code localstack/massa}) usa exatamente os campos e tipos do catálogo
- * de campos: nenhum campo fora do catálogo, nenhum campo do catálogo faltando, valores do tipo declarado.
+ * de campos: nenhum campo fora do catálogo, nenhum campo obrigatório faltando (um anulável pode faltar na custódia que\n * não o tem), valores do tipo declarado. A massa fica em {@code <id>/<CUSTODIA>/<BLOCO>.json}.
  */
 class CatalogoDeCamposMassaTest {
 
@@ -53,6 +54,15 @@ class CatalogoDeCamposMassaTest {
             var definicao = catalogo.definicao(bloco);
             var conteudo = jsonMapper.readValue(arquivo.toFile(), Object.class);
             var erros = new ArrayList<String>();
+            if (bloco == Bloco.OPERACAO && conteudo instanceof Map<?, ?> operacao) {
+                // Preenchido pela aplicação com a custódia em que a operação foi encontrada, nunca vem da origem
+                if (operacao.containsKey(Custodia.CAMPO)) {
+                    erros.add("operacao." + Custodia.CAMPO + ": vem da origem, mas é preenchido pela aplicação");
+                }
+                var semCustodia = new java.util.HashMap<Object, Object>(operacao);
+                semCustodia.put(Custodia.CAMPO, Custodia.SF.codigo());
+                conteudo = semCustodia;
+            }
             if (definicao.estrutura() == EstruturaBloco.LISTA) {
                 assertThat(conteudo).isInstanceOf(List.class);
                 ((List<?>) conteudo).forEach(item -> verificarObjeto(item, definicao.campos(), bloco.nome(), erros));
@@ -74,7 +84,10 @@ class CatalogoDeCamposMassaTest {
         for (var campo : campos) {
             var caminhoCampo = caminho + "." + campo.nome();
             if (!objeto.containsKey(campo.nome())) {
-                erros.add(caminhoCampo + ": ausente");
+                // Campo que a custódia não tem fica ausente (ADR-0012); só um campo anulável pode faltar
+                if (!campo.anulavel()) {
+                    erros.add(caminhoCampo + ": ausente");
+                }
                 continue;
             }
             verificarValor(objeto.get(campo.nome()), campo, caminhoCampo, erros);

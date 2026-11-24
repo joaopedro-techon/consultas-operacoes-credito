@@ -40,14 +40,14 @@ class CachePropertiesTest {
     void limitesMenoresQueUmSaoRejeitados() {
         var ttl = Duration.ofMinutes(5);
         var prazo = Duration.ofMillis(20);
-        assertThatIllegalArgumentException().isThrownBy(() -> new CacheProperties(true, ttl, 0, 500, prazo, 32))
+        assertThatIllegalArgumentException().isThrownBy(() -> new CacheProperties(true, ttl, 0, 500, prazo, 32, Duration.ofHours(24)))
                 .withMessageContaining("chaves-por-comando");
-        assertThatIllegalArgumentException().isThrownBy(() -> new CacheProperties(true, ttl, 100, 0, prazo, 32))
+        assertThatIllegalArgumentException().isThrownBy(() -> new CacheProperties(true, ttl, 100, 0, prazo, 32, Duration.ofHours(24)))
                 .withMessageContaining("max-chaves-por-consulta");
-        assertThatIllegalArgumentException().isThrownBy(() -> new CacheProperties(true, ttl, 100, 500, prazo, 0))
+        assertThatIllegalArgumentException().isThrownBy(() -> new CacheProperties(true, ttl, 100, 500, prazo, 0, Duration.ofHours(24)))
                 .withMessageContaining("max-gravacoes-simultaneas");
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new CacheProperties(true, ttl, 100, 500, Duration.ofMillis(-1), 32))
+                .isThrownBy(() -> new CacheProperties(true, ttl, 100, 500, Duration.ofMillis(-1), 32, Duration.ofHours(24)))
                 .withMessageContaining("prazo-minimo-restante");
     }
 
@@ -57,6 +57,6 @@ class CachePropertiesTest {
     }
 
     static CacheProperties propriedades(Duration ttl) {
-        return new CacheProperties(true, ttl, 100, 500, Duration.ofMillis(20), 32);
+        return new CacheProperties(true, ttl, 100, 500, Duration.ofMillis(20), 32, Duration.ofHours(24));
     }
 }

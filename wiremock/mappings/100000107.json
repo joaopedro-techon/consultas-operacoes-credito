@@ -3,59 +3,84 @@
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000107/blocos/amortizacoes"
+        "urlPath": "/mainframe/custodias/OD/operacoes/100000107/blocos/amortizacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "000"
+        "body": "000N                    "
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000107/blocos/componentes"
+        "urlPath": "/mainframe/custodias/OD/operacoes/100000107/blocos/componentes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "004000000000100000107001001LIBERACAO           000000000100000ATIVO     000000000100000107002002IOF                 000000000000377ATIVO     000000000100000107003003IOF_FLAT            000000000000380ATIVO     000000000100000107004004SEGURO              000000000000000ATIVO     "
+        "body": "004N                    000000000100000107001001LIBERACAO           000000000100000ATIVO     000000000100000107002002IOF                 000000000000377ATIVO     000000000100000107003003IOF_FLAT            000000000000380ATIVO     000000000100000107004004SEGURO              000000000000000ATIVO     "
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000107/blocos/controles_iof"
+        "urlPath": "/mainframe/custodias/OD/operacoes/100000107/blocos/controles_iof",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "002000000000100000107001001001000000000000127000000000000000          000000000100000107002001001000000000000250000000000000000          "
+        "body": "002N                    000000000100000107001001001000000000000127000000000000000          000000000100000107002001001000000000000250000000000000000          "
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000107/blocos/operacao"
+        "urlPath": "/mainframe/custodias/OD/operacoes/100000107/blocos/operacao",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "000000000100000107ATIVA          2026-03-03          11222333000181"
+        "body": "000000000100000107ATIVA          CNSG012026-03-03          11222333000181"
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000107/blocos/originacao"
+        "urlPath": "/mainframe/custodias/OD/operacoes/100000107/blocos/originacao",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
@@ -68,20 +93,30 @@
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000107/blocos/parcelas"
+        "urlPath": "/mainframe/custodias/OD/operacoes/100000107/blocos/parcelas",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "0020000000001000001070010012026-04-03000000000050000000000000001000ABERTA         0000000001000001070020012026-05-03000000000050000000000000001000ABERTA         "
+        "body": "002N                    0000000001000001070010012026-04-03000000000050000000000000001000ABERTA         0000000001000001070020012026-05-03000000000050000000000000001000ABERTA         "
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000107/blocos/plano"
+        "urlPath": "/mainframe/custodias/OD/operacoes/100000107/blocos/plano",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
@@ -94,20 +129,30 @@
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000107/blocos/recebimentos"
+        "urlPath": "/mainframe/custodias/OD/operacoes/100000107/blocos/recebimentos",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "000"
+        "body": "000N                    "
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000107/blocos/saldo"
+        "urlPath": "/mainframe/custodias/OD/operacoes/100000107/blocos/saldo",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,

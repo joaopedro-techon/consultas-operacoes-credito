@@ -14,20 +14,52 @@ import java.util.Map;
  */
 final class GatewayMainframeSimulado {
 
+    /** Página única sem ocorrências: {@code 000} + {@code N} + chave de continuação em branco (ADR-0016). */
+    static final String PAGINA_VAZIA = "000N" + " ".repeat(20);
+
     private final RestClient admin;
 
     GatewayMainframeSimulado(GenericContainer<?> wireMock) {
         this.admin = RestClient.create(FontePrimariaContainers.urlWireMock(wireMock));
     }
 
-    /** Blocos {@code operacao}, {@code originacao} e {@code parcelas} (vazio) válidos de uma operação fictícia. */
+    /** Prefixo das rotas do gateway de uma custódia, ex.: {@code /mainframe/custodias/SF}. */
+    static String custodia(String custodia) {
+        return "/mainframe/custodias/" + custodia;
+    }
+
+    /** Rota de um bloco de uma operação numa custódia. */
+    static String bloco(String custodia, long id, String bloco) {
+        return custodia(custodia) + "/operacoes/" + id + "/blocos/" + bloco;
+    }
+
+    /** Padrão das rotas de todos os blocos de uma operação, em qualquer custódia. */
+    static String blocos(long id) {
+        return "/mainframe/custodias/[A-Z0-9]+/operacoes/" + id + "/blocos/.*";
+    }
+
+    /**
+     * Blocos {@code operacao}, {@code originacao} e {@code parcelas} (vazio) válidos de uma operação fictícia na
+     * custódia SF; nas outras custódias, sem stub, o WireMock responde 404 (a operação não está nelas).
+     */
     void registrarOperacao(long id, int atrasoMs) {
-        var base = "/mainframe/operacoes/" + id + "/blocos/";
+        registrarOperacao("SF", id, atrasoMs);
+    }
+
+    /** Idem, numa custódia (layout base: SF, F5, NSF; a OD tem um campo extra no bloco operacao). */
+    void registrarOperacao(String custodia, long id, int atrasoMs) {
+        var base = custodia(custodia) + "/operacoes/" + id + "/blocos/";
         registrar(Map.of("method", "GET", "url", base + "operacao"),
                 resposta(200, "%018dATIVA          2026-01-01          70000000159   ".formatted(id), atrasoMs));
         registrar(Map.of("method", "GET", "url", base + "originacao"),
                 resposta(200, "%018dMOBILE              004  ".formatted(id), atrasoMs));
-        registrar(Map.of("method", "GET", "url", base + "parcelas"), resposta(200, "000", atrasoMs));
+        registrar(Map.of("method", "GET", "url", base + "parcelas"), resposta(200, PAGINA_VAZIA, atrasoMs));
+    }
+
+    /** Página com as ocorrências já formatadas e, se {@code proxima} não for nula, a chave da próxima. */
+    static String pagina(int quantidade, String proxima, String ocorrencias) {
+        return "%03d".formatted(quantidade) + (proxima == null ? "N" : "S")
+                + "%-20s".formatted(proxima == null ? "" : proxima) + ocorrencias;
     }
 
     /** Stub de uma URL exata; devolve o id do mapeamento. */
@@ -41,6 +73,16 @@ final class GatewayMainframeSimulado {
         mapeamento.put("priority", 1);
         mapeamento.put("request", Map.of("method", "GET", "urlPathPattern", urlPathPattern));
         mapeamento.put("response", resposta(status, corpo, atrasoMs));
+        return enviar(mapeamento);
+    }
+
+    /** Stub de uma página seguinte ({@code chave_continuacao}) de uma rota, com prioridade sobre os gerados. */
+    String registrarPagina(String urlPath, String chaveContinuacao, int status, String corpo) {
+        var mapeamento = new HashMap<String, Object>();
+        mapeamento.put("priority", 1);
+        mapeamento.put("request", Map.of("method", "GET", "urlPath", urlPath,
+                "queryParameters", Map.of("chave_continuacao", Map.of("equalTo", chaveContinuacao))));
+        mapeamento.put("response", resposta(status, corpo, 0));
         return enviar(mapeamento);
     }
 

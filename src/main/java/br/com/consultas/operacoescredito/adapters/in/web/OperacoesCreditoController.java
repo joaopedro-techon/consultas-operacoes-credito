@@ -1,6 +1,7 @@
 package br.com.consultas.operacoescredito.adapters.in.web;
 
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -27,12 +28,15 @@ class OperacoesCreditoController {
 
     /** Segmento da rota da fonte primária; sem ele, a consulta vai à visão consolidada. */
     static final String FONTE_PRIMARIA = "fonte-primaria";
+    /** Caminho da rota da fonte primária (o prazo da requisição e o ALB separam as rotas por ele). */
+    static final String CAMINHO_FONTE_PRIMARIA = "/v1/operacoes-credito/" + FONTE_PRIMARIA;
 
-    private final ConsultarOperacoesUseCase visaoConsolidada;
-    private final ConsultarOperacoesUseCase fontePrimaria;
+    private final ObjectProvider<ConsultarOperacoesUseCase> visaoConsolidada;
+    private final ObjectProvider<ConsultarOperacoesUseCase> fontePrimaria;
 
-    OperacoesCreditoController(ConsultarOperacoesUseCase visaoConsolidada,
-                               @Qualifier("fontePrimaria") ConsultarOperacoesUseCase fontePrimaria) {
+    /** Cada rota só existe se estiver ativa nesta instância ({@code consultas.rotas-ativas}, ADR-0015). */
+    OperacoesCreditoController(ObjectProvider<ConsultarOperacoesUseCase> visaoConsolidada,
+                               @Qualifier("fontePrimaria") ObjectProvider<ConsultarOperacoesUseCase> fontePrimaria) {
         this.visaoConsolidada = visaoConsolidada;
         this.fontePrimaria = fontePrimaria;
     }
@@ -56,7 +60,10 @@ class OperacoesCreditoController {
             HttpServletRequest requisicao) {
         ParametrosConsulta.rejeitarRepetidos(requisicao.getParameterMap());
         var parametros = new ParametrosConsulta(tipoConsulta, idOperacao, cpfCnpj, conta, limiteOperacoes, expand, fields);
-        var consultarOperacoes = rota == null ? visaoConsolidada : fontePrimaria;
+        var consultarOperacoes = (rota == null ? visaoConsolidada : fontePrimaria).getIfAvailable();
+        if (consultarOperacoes == null) {
+            throw new RotaInativaException(rota == null ? "visao-consolidada" : FONTE_PRIMARIA);
+        }
         var operacoes = consultarOperacoes.consultar(new Consulta(
                 parametros.criterio(), parametros.blocos(), parametros.campos(), FiltroRsql.traduzir(filter)));
         requisicao.setAttribute(RegistroDeConsumoHttp.ATRIBUTO_QUANTIDADE_OPERACOES, operacoes.size());

@@ -1,6 +1,13 @@
-"""Gera a massa da visão consolidada em localstack/massa/<id_operacao>/.
+"""Gera a massa da visão consolidada em localstack/massa/<id_operacao>/<CUSTODIA>/<BLOCO>.json.
 
 Uso: python localstack/gerar_massa.py
+
+Cada operação tem localstack/massa/<id_operacao>/indices.env (CPF/CNPJ e conta, atributos dos GSIs) e um
+diretório por custódia em que está registrada (SF, F5, OD, NSF; ADR-0012). Uma operação duplicada tem os
+mesmos blocos em mais de uma custódia; a API escolhe a vencedora pela precedência NSF > SF > F5 > OD.
+Particularidades das custódias (iguais às dos layouts em src/main/resources/trancode/layouts/<CUSTODIA>/):
+- F5 não tem dependencia_contabil no bloco ORIGINACAO (o campo fica ausente no JSON);
+- OD e NSF têm o mesmo JSON da base (as diferenças delas são só de posição no trancode).
 
 A massa é derivada de uma especificação curta (OPERACOES, abaixo) para que os blocos fechem entre si:
 
@@ -21,7 +28,9 @@ Ao final, gera os stubs de trancode da fonte primária com localstack/gerar_tran
 
 Para incluir uma operação, acrescente uma entrada em OPERACOES e rode o script. Várias operações podem
 compartilhar cpf_cnpj e conta (consultas CLIENTE e CONTA). Blocos listados em "sem_blocos" não são
-gerados (bloco indisponível na visão consolidada).
+gerados (bloco indisponível na visão consolidada). "custodias" lista as custódias da operação (default SF);
+"variacoes" altera campos do bloco OPERACAO numa custódia específica (ex.: provar de qual custódia veio a
+resposta de uma operação duplicada).
 """
 import datetime as dt
 import json
@@ -36,10 +45,13 @@ DATA_POSICAO = dt.date(2026, 11, 23)
 CENTAVO = Decimal("0.01")
 TAXA_IOF_DIARIA = Decimal("0.000082")
 TAXA_IOF_FLAT = Decimal("0.0038")
+CUSTODIAS = ["SF", "F5", "OD", "NSF"]
+# Campos que a custódia não tem: ficam fora do JSON (layout da custódia sem o campo)
+CAMPOS_AUSENTES = {"F5": {"ORIGINACAO": ["dependencia_contabil"]}}
 
 OPERACOES = [
     {
-        "id": 100000001, "cpf_cnpj": "52998224725", "conta": "434115000065874",
+        "id": 100000001, "custodias": ["SF"], "cpf_cnpj": "52998224725", "conta": "434115000065874",
         "contratacao": "2026-05-21", "canal": "MOBILE", "dependencia": "004",
         "parcelas": 12, "principal": "6000.00", "taxa": "1.80", "seguro": "120.00",
         "recebimentos": [
@@ -52,7 +64,7 @@ OPERACOES = [
         ],
     },
     {
-        "id": 100000002, "cpf_cnpj": "52998224725", "conta": "434115000065874",
+        "id": 100000002, "custodias": ["SF"], "cpf_cnpj": "52998224725", "conta": "434115000065874",
         "contratacao": "2025-09-15", "canal": "AGENCIA", "dependencia": "012",
         "parcelas": 6, "principal": "1800.00", "taxa": "1.50", "seguro": "0.00",
         "recebimentos": [
@@ -63,14 +75,14 @@ OPERACOES = [
         ],
     },
     {
-        "id": 100000003, "cpf_cnpj": "52998224725", "conta": "434115000099991",
+        "id": 100000003, "custodias": ["F5"], "cpf_cnpj": "52998224725", "conta": "434115000099991",
         "contratacao": "2026-10-28", "canal": "INTERNET", "dependencia": "004",
         "parcelas": 24, "principal": "12000.00", "taxa": "1.65", "seguro": "240.00",
         "recebimentos": [],
         "sem_blocos": ["PLANO", "SALDO"],
     },
     {
-        "id": 100000004, "cpf_cnpj": "12ABC34501DE35", "conta": "434115000077712",
+        "id": 100000004, "custodias": ["OD"], "cpf_cnpj": "12ABC34501DE35", "conta": "434115000077712",
         "contratacao": "2026-08-05", "canal": "AGENCIA", "dependencia": "031",
         "parcelas": 10, "principal": "50000.00", "taxa": "1.20", "seguro": "0.00",
         "recebimentos": [
@@ -80,7 +92,7 @@ OPERACOES = [
         ],
     },
     {
-        "id": 100000005, "cpf_cnpj": "12ABC34501DE35", "conta": "434115000077712",
+        "id": 100000005, "custodias": ["NSF"], "cpf_cnpj": "12ABC34501DE35", "conta": "434115000077712",
         "contratacao": "2026-02-10", "canal": "INTERNET", "dependencia": "031",
         "parcelas": 4, "principal": "20000.00", "taxa": "1.10", "seguro": "0.00",
         "recebimentos": [
@@ -91,21 +103,34 @@ OPERACOES = [
         ],
     },
     {
-        "id": 100000006, "cpf_cnpj": "11144477735", "conta": "434115000088823",
+        # Duplicada em SF e NSF: a NSF vence pela precedência; a situação diferente prova de onde veio
+        "id": 100000006, "custodias": ["SF", "NSF"], "cpf_cnpj": "11144477735", "conta": "434115000088823",
         "contratacao": "2026-09-12", "canal": "MOBILE", "dependencia": "004",
         "parcelas": 8, "principal": "2400.00", "taxa": "2.10", "seguro": "48.00",
         "recebimentos": [
             ("2026-10-12T06:00:00", "350.40", "DESCONTO_FOLHA"),
             ("2026-11-12T06:00:00", "350.40", "DESCONTO_FOLHA"),
         ],
+        "variacoes": {"NSF": {"situacao_operacao_credito": "ATIVA_NSF"}},
+    },
+    {
+        # 75 parcelas, 34 pagas no vencimento: blocos-lista com mais de uma página no trancode (até 30
+        # ocorrências por página): parcelas e controles_iof em 3 páginas, amortizações e recebimentos em 2
+        "id": 100000007, "custodias": ["F5"], "cpf_cnpj": "39053344705", "conta": "434115000070007",
+        "contratacao": "2024-01-15", "canal": "AGENCIA", "dependencia": "004",
+        "parcelas": 75, "principal": "7500.00", "taxa": "1.00", "seguro": "150.00",
+        "recebimentos": [(f"{2024 + (k // 12)}-{k % 12 + 1:02d}-15T06:00:00", "175.00", "DESCONTO_FOLHA")
+                         for k in range(1, 35)],
     },
 ]
 
 # Cliente CNPJ numérico com muitas operações na mesma conta: 14 operações x 8 blocos além de "operacao"
 # passam de 100 chaves, então o BatchGetItem das consultas CLIENTE/CONTA precisa de mais de um lote.
+# Espalhadas pelas quatro custódias em rodízio (101 SF, 102 F5, 103 OD, 104 NSF, 105 SF...).
 OPERACOES += [
     {
-        "id": 100000101 + i, "cpf_cnpj": "11222333000181", "conta": "434115000055501",
+        "id": 100000101 + i, "custodias": [CUSTODIAS[i % len(CUSTODIAS)]],
+        "cpf_cnpj": "11222333000181", "conta": "434115000055501",
         "contratacao": f"{2025 + (8 + i) // 12}-{(8 + i) % 12 + 1:02d}-03", "canal": "AGENCIA",
         "dependencia": "045", "parcelas": 2, "principal": "1000.00", "taxa": "1.00", "seguro": "0.00",
         "recebimentos": [],
@@ -302,9 +327,19 @@ def main():
         diretorio.mkdir(parents=True)
         diretorio.joinpath("indices.env").write_text(
             f"CPF_CNPJ_CLIENTE={spec['cpf_cnpj']}\nCONTA_CLIENTE={spec['conta']}\n", encoding="utf-8", newline="\n")
-        for bloco, conteudo in gerar(spec).items():
-            diretorio.joinpath(f"{bloco}.json").write_text(para_json(conteudo), encoding="utf-8", newline="\n")
-        print(f"{spec['id']} gerada")
+        custodias = spec.get("custodias", ["SF"])
+        for custodia in custodias:
+            assert custodia in CUSTODIAS, f"{spec['id']}: custódia desconhecida {custodia}"
+            pasta = diretorio / custodia
+            pasta.mkdir()
+            blocos = gerar(spec)
+            for bloco, campos in CAMPOS_AUSENTES.get(custodia, {}).items():
+                for campo in campos:
+                    blocos.get(bloco, {}).pop(campo, None)
+            blocos["OPERACAO"].update(spec.get("variacoes", {}).get(custodia, {}))
+            for bloco, conteudo in blocos.items():
+                pasta.joinpath(f"{bloco}.json").write_text(para_json(conteudo), encoding="utf-8", newline="\n")
+        print(f"{spec['id']} gerada ({', '.join(custodias)})")
     # Stubs de trancode da fonte primária derivados da mesma massa (mantém as duas fontes coerentes)
     gerar_trancode.main()
 

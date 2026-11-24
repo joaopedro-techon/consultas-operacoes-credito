@@ -17,7 +17,6 @@ import org.springframework.web.client.RestClient;
 import org.testcontainers.containers.GenericContainer;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -44,6 +43,8 @@ class FontePrimariaClienteContaIT {
     /** Cliente (e conta) com 14 operações mensais, de 100000101 (mais antiga) a 100000114. */
     private static final String CNPJ_14_OPERACOES = "11222333000181";
     private static final String CONTA_14_OPERACOES = "434115000055501";
+    /** Prefixo das rotas do gateway em qualquer custódia. */
+    private static final String CUSTODIA = "/mainframe/custodias/[A-Z0-9]+";
 
     private final RestTestClient client;
     private final GenericContainer<?> wireMock;
@@ -109,21 +110,23 @@ class FontePrimariaClienteContaIT {
     }
 
     @ParameterizedTest(name = "{0}")
-    @CsvSource({
-            "/mainframe/clientes/" + CNPJ_14_OPERACOES + "/operacoes",
-            "/mainframe/contas/" + CONTA_14_OPERACOES + "/operacoes",
-            "/mainframe/clientes/52998224725/operacoes",
-            "/mainframe/contas/434115000077712/operacoes"})
-    void listaDeOperacoesSimuladaNoGatewayVemDaMaisRecenteParaAMaisAntiga(String rota) {
-        var trancode = RestClient.create(FontePrimariaContainers.urlWireMock(wireMock)).get().uri(rota)
-                .retrieve()
-                .body(String.class);
+    @CsvSource({"clientes/" + CNPJ_14_OPERACOES, "contas/" + CONTA_14_OPERACOES})
+    void operacoesDoClienteEDaContaEstaoEspalhadasPelasQuatroCustodias(String rota) {
+        var gateway = RestClient.create(FontePrimariaContainers.urlWireMock(wireMock));
+        var porCustodia = new ArrayList<Integer>();
+        for (var custodia : List.of("SF", "F5", "OD", "NSF")) {
+            var trancode = gateway.get().uri("/mainframe/custodias/" + custodia + "/" + rota + "/operacoes")
+                    .retrieve()
+                    .body(String.class);
+            // Página única: quantidade (3) + "N" + chave em branco (20) + registros de 18 (id) + 10 (data)
+            var quantidade = Integer.parseInt(trancode.substring(0, 3));
+            assertThat(trancode.charAt(3)).isEqualTo('N');
+            assertThat(trancode).hasSize(24 + quantidade * 28);
+            porCustodia.add(quantidade);
+        }
 
-        var operacoes = lerListaDeOperacoes(trancode);
-        assertThat(operacoes).hasSizeGreaterThanOrEqualTo(2);
-        assertThat(operacoes).isSortedAccordingTo(
-                Comparator.comparing(OperacaoListada::dataContratacao).reversed()
-                        .thenComparing(Comparator.comparingLong(OperacaoListada::idOperacao).reversed()));
+        assertThat(porCustodia).allSatisfy(quantidade -> assertThat(quantidade).isPositive());
+        assertThat(porCustodia.stream().mapToInt(Integer::intValue).sum()).isEqualTo(14);
     }
 
     @Test
@@ -135,10 +138,11 @@ class FontePrimariaClienteContaIT {
                 .expectBody()
                 .jsonPath("$.data[*].operacao.id_operacao").isEqualTo(List.of(100000114, 100000113, 100000112));
 
-        // Uma chamada à lista + 3 operações × (operacao, originacao, parcelas); nenhuma das outras 11 operações
-        assertThat(chamadasAoGateway("/mainframe/clientes/.*", correlationId)).isEqualTo(1);
-        assertThat(chamadasAoGateway("/mainframe/operacoes/.*", correlationId)).isEqualTo(9);
-        assertThat(chamadasAoGateway("/mainframe/operacoes/10000011[234]/blocos/.*", correlationId)).isEqualTo(9);
+        // A lista em cada custódia + 3 operações × (operacao, originacao, parcelas), cada uma na sua custódia;
+        // nenhuma das outras 11 operações
+        assertThat(chamadasAoGateway(CUSTODIA + "/clientes/.*", correlationId)).isEqualTo(4);
+        assertThat(chamadasAoGateway(CUSTODIA + "/operacoes/.*", correlationId)).isEqualTo(9);
+        assertThat(chamadasAoGateway(CUSTODIA + "/operacoes/10000011[234]/blocos/.*", correlationId)).isEqualTo(9);
     }
 
     @Test
@@ -150,10 +154,10 @@ class FontePrimariaClienteContaIT {
                 .expectBody()
                 .jsonPath("$.data.length()").isEqualTo(14);
 
-        assertThat(chamadasAoGateway("/mainframe/contas/.*", correlationId)).isEqualTo(1);
-        assertThat(chamadasAoGateway("/mainframe/operacoes/.*/blocos/(operacao|originacao|saldo)", correlationId))
+        assertThat(chamadasAoGateway(CUSTODIA + "/contas/.*", correlationId)).isEqualTo(4);
+        assertThat(chamadasAoGateway(CUSTODIA + "/operacoes/.*/blocos/(operacao|originacao|saldo)", correlationId))
                 .isEqualTo(14 * 3);
-        assertThat(chamadasAoGateway("/mainframe/operacoes/.*", correlationId)).isEqualTo(14 * 3);
+        assertThat(chamadasAoGateway(CUSTODIA + "/operacoes/.*", correlationId)).isEqualTo(14 * 3);
     }
 
     @ParameterizedTest(name = "{0} {1} -> 400 igual à visão consolidada")
@@ -229,20 +233,5 @@ class FontePrimariaClienteContaIT {
                 .retrieve()
                 .body(Map.class);
         return ((Number) resposta.get("count")).intValue();
-    }
-
-    /** Lê o trancode da lista: 3 dígitos de quantidade + registros de 18 (id) + 10 (data) posições. */
-    private static List<OperacaoListada> lerListaDeOperacoes(String trancode) {
-        var quantidade = Integer.parseInt(trancode.substring(0, 3));
-        assertThat(trancode).hasSize(3 + quantidade * 28);
-        var operacoes = new ArrayList<OperacaoListada>();
-        for (int i = 0; i < quantidade; i++) {
-            var registro = trancode.substring(3 + i * 28, 3 + (i + 1) * 28);
-            operacoes.add(new OperacaoListada(Long.parseLong(registro.substring(0, 18)), registro.substring(18)));
-        }
-        return operacoes;
-    }
-
-    private record OperacaoListada(long idOperacao, String dataContratacao) {
     }
 }

@@ -65,7 +65,7 @@ class FontePrimariaIT {
     }
 
     @ParameterizedTest(name = "id_operacao={0}")
-    @ValueSource(strings = {"100000001", "100000002", "100000003", "100000004", "100000005", "100000006"})
+    @ValueSource(strings = {"100000001", "100000002", "100000003", "100000004", "100000005", "100000006", "100000007"})
     void todosOsBlocosDaMassaVemDaFontePrimariaComOMesmoJsonEHeaderDaVisaoConsolidada(String idOperacao) {
         var fontePrimaria = resposta(ROTA_FONTE_PRIMARIA, idOperacao, TODOS_OS_BLOCOS);
         var visaoConsolidada = resposta(ROTA_VISAO_CONSOLIDADA, idOperacao, TODOS_OS_BLOCOS);
@@ -149,7 +149,8 @@ class FontePrimariaIT {
                 .expectStatus().isOk()
                 .expectHeader().valueEquals(HEADER_CORRELATION_ID, correlationId);
 
-        assertThat(chamadasAoGateway(Map.of(HEADER_CORRELATION_ID, Map.of("equalTo", correlationId)))).isEqualTo(3);
+        // Descoberta: operacao nas 4 custódias; depois originacao e parcelas só na SF
+        assertThat(chamadasAoGateway(Map.of(HEADER_CORRELATION_ID, Map.of("equalTo", correlationId)))).isEqualTo(6);
     }
 
     @Test
@@ -166,48 +167,78 @@ class FontePrimariaIT {
         }
 
         assertThat(chamadasAoGateway(Map.of("traceparent",
-                Map.of("matches", "00-" + traceId + "-[0-9a-f]{16}-0[01]")))).isEqualTo(2);
+                Map.of("matches", "00-" + traceId + "-[0-9a-f]{16}-0[01]")))).isEqualTo(5);
     }
 
     @Test
-    void erroDoGatewayDevolve502SemRespostaParcial() {
+    void erroDoGatewayNumBlocoDevolveRespostaParcial() {
         registrarStub(900000001L, "parcelas", 500, "erro interno");
         registrarStub(900000001L, "operacao", 200, "000000000900000001ATIVA          2026-05-21          52998224725   ");
         registrarStub(900000001L, "originacao", 200, "000000000900000001MOBILE              004  ");
 
         consultar(ROTA_FONTE_PRIMARIA, "900000001", "parcelas")
-                .expectStatus().isEqualTo(502)
-                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectStatus().isOk()
+                .expectHeader().valueEquals(HEADER_INDISPONIVEIS, "parcelas")
                 .expectBody()
-                .jsonPath("$.status").isEqualTo(502)
-                .jsonPath("$.data").doesNotExist()
-                .jsonPath("$.detail").value(String.class, detail -> assertThat(detail).doesNotContain("erro interno"));
+                .jsonPath("$.data[0].operacao.situacao_operacao_credito").isEqualTo("ATIVA")
+                .jsonPath("$.data[0].operacao.custodia").isEqualTo("SF")
+                .jsonPath("$.data[0].parcelas").isEqualTo(null);
     }
 
-    @ParameterizedTest(name = "trancode de operacao \"{0}\" -> 502")
+    @Test
+    void blocoListaDe75ParcelasVemEmTresPaginasLidasEmSequencia() {
+        consultar(ROTA_FONTE_PRIMARIA, "100000007", "parcelas")
+                .expectStatus().isOk()
+                .expectHeader().doesNotExist(HEADER_INDISPONIVEIS)
+                .expectBody()
+                .jsonPath("$.data[0].operacao.custodia").isEqualTo("F5")
+                .jsonPath("$.data[0].parcelas.length()").isEqualTo(75)
+                .jsonPath("$.data[0].parcelas[74].numero_parcela_amortizacao").isEqualTo(75);
+    }
+
+    @Test
+    void falhaNumaPaginaDeixaOBlocoIndisponivelEmVezDeTruncado() {
+        var gateway = new GatewayMainframeSimulado(wireMock);
+        var falha = gateway.registrarPagina(GatewayMainframeSimulado.bloco("F5", 100000007L, "parcelas"),
+                "PARCELAS000061", 500, "erro");
+        try {
+            consultar(ROTA_FONTE_PRIMARIA, "100000007", "parcelas,saldo")
+                    .expectStatus().isOk()
+                    .expectHeader().valueEquals(HEADER_INDISPONIVEIS, "parcelas")
+                    .expectBody()
+                    .jsonPath("$.data[0].parcelas").isEqualTo(null)
+                    .jsonPath("$.data[0].saldo").exists();
+        } finally {
+            gateway.remover(falha);
+        }
+    }
+
+    @ParameterizedTest(name = "trancode de operacao \"{0}\" -> 503")
     @ValueSource(strings = {
             "000000000900000002ATIVA          2026-05-21",
             "000000000900000002ATIVA          2026-05-21          52998224725   XYZ",
             "00000000090000000XATIVA          2026-05-21          52998224725   ",
             "000000000900000002ATIVA          2026-13-45          52998224725   "})
-    void trancodeForaDoLayoutDevolve502(String trancode) {
+    void trancodeDoBlocoOperacaoForaDoLayoutDevolve503ComACustodia(String trancode) {
         registrarStub(900000002L, "operacao", 200, trancode);
         registrarStub(900000002L, "originacao", 200, "000000000900000002MOBILE              004  ");
 
+        // Sem um bloco operacao legível na SF não se sabe se a operação existe nela (ADR-0013)
         consultar(ROTA_FONTE_PRIMARIA, "900000002", "")
-                .expectStatus().isEqualTo(502)
+                .expectStatus().isEqualTo(503)
                 .expectBody()
-                .jsonPath("$.title").isEqualTo("Fonte de dados indisponível");
+                .jsonPath("$.custodias_indisponiveis[0]").isEqualTo("SF");
     }
 
     @Test
-    void quantidadeDeItensInvalidaNoBlocoListaDevolve502() {
+    void quantidadeDeItensInvalidaNoBlocoListaODeixaIndisponivel() {
         registrarStub(900000003L, "operacao", 200, "000000000900000003ATIVA          2026-05-21          52998224725   ");
         registrarStub(900000003L, "originacao", 200, "000000000900000003MOBILE              004  ");
         registrarStub(900000003L, "recebimentos", 200, "0A1");
 
         consultar(ROTA_FONTE_PRIMARIA, "900000003", "recebimentos")
-                .expectStatus().isEqualTo(502);
+                .expectStatus().isOk()
+                .expectHeader().valueEquals(HEADER_INDISPONIVEIS, "recebimentos");
     }
 
     private RestTestClient.ResponseSpec consultar(String rota, String idOperacao, String expand) {
@@ -220,7 +251,7 @@ class FontePrimariaIT {
     private int chamadasAoGateway(Map<String, Object> headers) {
         var resposta = adminWireMock().post().uri("/__admin/requests/count")
                 .contentType(MediaType.APPLICATION_JSON)
-                .body(Map.of("method", "GET", "urlPathPattern", "/mainframe/operacoes/.*", "headers", headers))
+                .body(Map.of("method", "GET", "urlPathPattern", "/mainframe/custodias/.*", "headers", headers))
                 .retrieve()
                 .body(Map.class);
         return ((Number) resposta.get("count")).intValue();
@@ -231,7 +262,7 @@ class FontePrimariaIT {
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of(
                         "request", Map.of("method", "GET",
-                                "url", "/mainframe/operacoes/" + idOperacao + "/blocos/" + bloco),
+                                "url", GatewayMainframeSimulado.bloco("SF", idOperacao, bloco)),
                         "response", Map.of("status", status, "body", corpo,
                                 "headers", Map.of("Content-Type", "text/plain; charset=utf-8"))))
                 .retrieve()

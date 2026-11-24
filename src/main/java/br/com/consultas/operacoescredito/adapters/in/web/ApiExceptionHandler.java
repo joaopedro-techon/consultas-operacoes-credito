@@ -9,7 +9,12 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
+import br.com.consultas.operacoescredito.application.port.out.CotaDaFonteEsgotadaException;
+import br.com.consultas.operacoescredito.application.port.out.CustodiasIndisponiveisException;
 import br.com.consultas.operacoescredito.application.port.out.FalhaNaFonteDeOperacoesException;
+import br.com.consultas.operacoescredito.domain.Custodia;
+
+import java.time.Duration;
 import br.com.consultas.operacoescredito.application.port.out.FonteDeOperacoesIndisponivelException;
 import br.com.consultas.operacoescredito.application.port.out.TempoEsgotadoNaFonteDeOperacoesException;
 import br.com.consultas.operacoescredito.domain.OperacaoNaoEncontradaException;
@@ -21,10 +26,17 @@ import br.com.consultas.operacoescredito.domain.selecao.SelecaoDeCamposInvalidaE
 class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger LOG = LoggerFactory.getLogger(ApiExceptionHandler.class);
+    /** Propriedade do Problem Details com os códigos das custódias indisponíveis. */
+    static final String PROPRIEDADE_CUSTODIAS = "custodias_indisponiveis";
 
     @ExceptionHandler(OperacaoNaoEncontradaException.class)
     ProblemDetail operacaoNaoEncontrada(OperacaoNaoEncontradaException e) {
         return problema(HttpStatus.NOT_FOUND, "Operação de crédito não encontrada", e.getMessage());
+    }
+
+    @ExceptionHandler(RotaInativaException.class)
+    ProblemDetail rotaInativa(RotaInativaException e) {
+        return problema(HttpStatus.NOT_FOUND, "Rota não encontrada", e.getMessage());
     }
 
     @ExceptionHandler(RequisicaoInvalidaException.class)
@@ -50,16 +62,47 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                         + "blocos em expand ou consulte uma operação por vez (x-tipo-consulta: OPERACAO)");
     }
 
-    /** Circuit breaker aberto, bulkhead cheio ou rate limiter interno: 503 com {@code Retry-After} em segundos. */
+    /**
+     * Custódia que não pôde ser consultada sem a qual a resposta não seria confiável (ADR-0012): 503 com as
+     * custódias em {@value #PROPRIEDADE_CUSTODIAS} e {@code Retry-After}.
+     */
+    @ExceptionHandler(CustodiasIndisponiveisException.class)
+    ResponseEntity<ProblemDetail> custodiasIndisponiveis(CustodiasIndisponiveisException e) {
+        LOG.warn("Custódias indisponíveis, consulta sem resposta confiável: {}", e.getMessage());
+        var codigos = e.custodias().stream().map(Custodia::codigo).toList();
+        var problema = problema(HttpStatus.SERVICE_UNAVAILABLE, "Custódia temporariamente indisponível",
+                "Não foi possível consultar as custódias " + String.join(", ", codigos) + "; sem elas não é possível "
+                        + "afirmar o resultado. Tente novamente depois do tempo indicado em Retry-After");
+        problema.setProperty(PROPRIEDADE_CUSTODIAS, codigos);
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, retryAfter(e.tenteNovamenteEm()))
+                .body(problema);
+    }
+
+    /** Circuit breaker aberto ou bulkhead cheio: 503 com {@code Retry-After} em segundos. */
     @ExceptionHandler(FonteDeOperacoesIndisponivelException.class)
     ResponseEntity<ProblemDetail> fonteIndisponivel(FonteDeOperacoesIndisponivelException e) {
         LOG.warn("Fonte de operações protegida, chamada recusada: {}", e.getMessage());
-        var segundos = Math.max(1, (e.tenteNovamenteEm().toMillis() + 999) / 1000);
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                .header(HttpHeaders.RETRY_AFTER, Long.toString(segundos))
+                .header(HttpHeaders.RETRY_AFTER, retryAfter(e.tenteNovamenteEm()))
                 .body(problema(HttpStatus.SERVICE_UNAVAILABLE, "Fonte de dados temporariamente indisponível",
                         "A fonte de dados está protegida contra sobrecarga ou falhas recentes; tente novamente "
                                 + "depois do tempo indicado em Retry-After"));
+    }
+
+    /** Cota de chamadas da fonte primária esgotada (ADR-0015): 429 com {@code Retry-After}, sem esperar. */
+    @ExceptionHandler(CotaDaFonteEsgotadaException.class)
+    ResponseEntity<ProblemDetail> cotaEsgotada(CotaDaFonteEsgotadaException e) {
+        LOG.warn("Cota da fonte primária esgotada, consulta recusada: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header(HttpHeaders.RETRY_AFTER, retryAfter(e.tenteNovamenteEm()))
+                .body(problema(HttpStatus.TOO_MANY_REQUESTS, "Cota da fonte de dados esgotada",
+                        "A fonte primária atingiu o limite de chamadas por segundo; tente novamente depois do "
+                                + "tempo indicado em Retry-After ou use a visão consolidada"));
+    }
+
+    private static String retryAfter(Duration espera) {
+        return Long.toString(Math.max(1, (espera.toMillis() + 999) / 1000));
     }
 
     @ExceptionHandler(FalhaNaFonteDeOperacoesException.class)

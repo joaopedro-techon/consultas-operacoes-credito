@@ -191,6 +191,20 @@ class FiltroRsqlIT {
     }
 
     @Test
+    void filtroPelaCustodiaDaOperacao() {
+        // 100000001 está na custódia SF (campo preenchido pela aplicação, ADR-0012)
+        consultar(OPERACAO, "", "operacao.custodia==SF")
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.data.length()").isEqualTo(1)
+                .jsonPath("$.data[0].operacao.custodia").isEqualTo("SF");
+        consultar(OPERACAO, "", "operacao.custodia=in=(NSF,F5,OD)")
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.data").isEmpty();
+    }
+
+    @Test
     void filtroEmOriginacaoQueNaoAtendeRemoveAOperacaoInteira() {
         consultar(OPERACAO, "", "originacao.canal_contratacao=out=(MOBILE,AGENCIA)")
                 .expectStatus().isOk()

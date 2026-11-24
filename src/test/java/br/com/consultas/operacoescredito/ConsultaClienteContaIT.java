@@ -91,7 +91,7 @@ class ConsultaClienteContaIT {
 
     @ParameterizedTest(name = "{0} {1} sem operações -> 200 com data vazio")
     @CsvSource(delimiter = '|', textBlock = """
-            CLIENTE | cpf_cnpj=39053344705
+            CLIENTE | cpf_cnpj=70000000159
             CLIENTE | cpf_cnpj=98XYZ76501AB46
             CONTA   | conta=999999999
             """)

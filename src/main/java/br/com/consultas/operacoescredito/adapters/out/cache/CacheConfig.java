@@ -11,9 +11,12 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 
+import br.com.consultas.operacoescredito.domain.Custodia;
+
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 
 /** Cache por bloco da visão consolidada: Valkey ou, com {@code consultas.cache.habilitado=false}, desligado. */
@@ -27,8 +30,12 @@ class CacheConfig {
     /** Timeout de comando quando a fábrica de conexões não é a do Lettuce (o mesmo do {@code application.yml}). */
     private static final Duration TIMEOUT_COMANDO_PADRAO = Duration.ofMillis(10);
 
+    /** Um só bean para os dois caches: mesma conexão, mesmo circuito e mesmas vagas de gravação. */
+    interface CacheDeBlocosECustodia extends CacheDeBlocos, CacheDeCustodia {
+    }
+
     @Bean
-    CacheDeBlocos cacheDeBlocos(CacheProperties properties, ObjectProvider<RedisConnectionFactory> conexoes,
+    CacheDeBlocosECustodia cacheDeBlocos(CacheProperties properties, ObjectProvider<RedisConnectionFactory> conexoes,
                                 CircuitBreakerRegistry circuitBreakers, ObservationRegistry observationRegistry,
                                 MeterRegistry meterRegistry) {
         if (!properties.habilitado()) {
@@ -51,15 +58,35 @@ class CacheConfig {
     }
 
     /** Nada em cache, nada gravado. */
-    static final class CacheDesligado implements CacheDeBlocos {
+    static final class CacheDesligado implements CacheDeBlocosECustodia {
 
         @Override
-        public Map<ChaveDeBloco, byte[]> buscar(Collection<ChaveDeBloco> chaves) {
-            return Map.of();
+        public LeituraDoCache buscar(Collection<ChaveDeBloco> chaves, Collection<Long> custodiasDe) {
+            return LeituraDoCache.VAZIA;
         }
 
         @Override
-        public void gravar(Map<ChaveDeBloco, byte[]> blocos) {
+        public void gravar(Map<ChaveDeBloco, byte[]> blocos, Map<Long, Custodia> custodias) {
+            // desligado
+        }
+
+        @Override
+        public Optional<Custodia> buscar(long idOperacao) {
+            return Optional.empty();
+        }
+
+        @Override
+        public void gravar(long idOperacao, Custodia custodia) {
+            // desligado
+        }
+
+        @Override
+        public void gravarTodas(Map<Long, Custodia> custodias) {
+            // desligado
+        }
+
+        @Override
+        public void remover(long idOperacao) {
             // desligado
         }
     }

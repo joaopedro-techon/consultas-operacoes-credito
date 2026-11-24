@@ -22,6 +22,9 @@ interface ComandosValkey {
     /** {@code SET chave valor PX ttl}. */
     CompletableFuture<?> set(byte[] chave, byte[] valor, long ttlMilissegundos);
 
+    /** {@code DEL chave} (uma chave). */
+    CompletableFuture<?> del(byte[] chave);
+
     /**
      * Comandos sobre a conexão nativa compartilhada do Lettuce ({@code spring.data.redis}, standalone ou cluster).
      * Obter a conexão pode abrir a conexão TCP (limitada por {@code spring.data.redis.connect-timeout}); a resposta
@@ -43,6 +46,13 @@ interface ComandosValkey {
                 try (var conexao = conexoes.getConnection()) {
                     return nativa(conexao).set(chave, valor, SetArgs.Builder.px(ttlMilissegundos))
                             .toCompletableFuture();
+                }
+            }
+
+            @Override
+            public CompletableFuture<?> del(byte[] chave) {
+                try (var conexao = conexoes.getConnection()) {
+                    return nativa(conexao).del(chave).toCompletableFuture();
                 }
             }
         };

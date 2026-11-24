@@ -4,6 +4,7 @@ import br.com.consultas.operacoescredito.config.observabilidade.CacheDaRequisica
 import br.com.consultas.operacoescredito.config.observabilidade.Observacoes;
 import br.com.consultas.operacoescredito.config.resiliencia.PrazoDaRequisicao;
 import br.com.consultas.operacoescredito.domain.Bloco;
+import br.com.consultas.operacoescredito.domain.Custodia;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.lettuce.core.RedisCommandInterruptedException;
@@ -15,6 +16,7 @@ import io.micrometer.observation.ObservationRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -54,7 +56,7 @@ import java.util.function.Supplier;
  * {@code resultado=hit|miss|indisponivel|ignorado}) e na contagem da requisição ({@link CacheDaRequisicao}, que
  * segue no evento de consumo: lá só há hits e misses, e indisponível ou ignorado conta como miss).
  */
-class ValkeyCacheDeBlocos implements CacheDeBlocos {
+class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
 
     static final String DEPENDENCIA = "valkey";
     static final String METRICA_CACHE = "consultas.cache";
@@ -82,6 +84,7 @@ class ValkeyCacheDeBlocos implements CacheDeBlocos {
     private final ObservationRegistry observationRegistry;
     private final Duration timeoutComando;
     private final long ttlEmMilissegundos;
+    private final long ttlCustodiaEmMilissegundos;
     private final int chavesPorComando;
     private final int maxChavesPorConsulta;
     private final Duration prazoMinimoRestante;
@@ -97,6 +100,7 @@ class ValkeyCacheDeBlocos implements CacheDeBlocos {
         this.observationRegistry = observationRegistry;
         this.timeoutComando = timeoutComando;
         this.ttlEmMilissegundos = properties.ttl().toMillis();
+        this.ttlCustodiaEmMilissegundos = properties.ttlCustodia().toMillis();
         this.chavesPorComando = properties.chavesPorComando();
         this.maxChavesPorConsulta = properties.maxChavesPorConsulta();
         this.prazoMinimoRestante = properties.prazoMinimoRestante();
@@ -108,19 +112,23 @@ class ValkeyCacheDeBlocos implements CacheDeBlocos {
     }
 
     @Override
-    public Map<ChaveDeBloco, byte[]> buscar(Collection<ChaveDeBloco> chaves) {
-        if (chaves.isEmpty()) {
-            return Map.of();
+    public LeituraDoCache buscar(Collection<ChaveDeBloco> chaves, Collection<Long> custodiasDe) {
+        if (chaves.isEmpty() && custodiasDe.isEmpty()) {
+            return LeituraDoCache.VAZIA;
         }
         var ordenadas = List.copyOf(chaves);
-        if (ordenadas.size() > maxChavesPorConsulta || !PrazoDaRequisicao.comporta(prazoMinimoRestante)) {
+        var ids = List.copyOf(custodiasDe);
+        if (ordenadas.size() + ids.size() > maxChavesPorConsulta || !PrazoDaRequisicao.comporta(prazoMinimoRestante)) {
             contar(ordenadas, Resultado.IGNORADO);
-            return Map.of();
+            return LeituraDoCache.VAZIA;
         }
-        var valores = executar("MGET", null, () -> mget(ordenadas));
+        var todas = new ArrayList<byte[]>(ordenadas.size() + ids.size());
+        ordenadas.forEach(chave -> todas.add(chave.bytes()));
+        ids.forEach(id -> todas.add(bytes(CacheDeCustodia.chave(id))));
+        var valores = executar("MGET", null, () -> mget(todas));
         if (valores.isEmpty()) {
             contar(ordenadas, Resultado.INDISPONIVEL);
-            return Map.of();
+            return LeituraDoCache.VAZIA;
         }
         var encontrados = new HashMap<ChaveDeBloco, byte[]>();
         for (int i = 0; i < ordenadas.size(); i++) {
@@ -133,7 +141,38 @@ class ValkeyCacheDeBlocos implements CacheDeBlocos {
                 contar(chave, Resultado.MISS);
             }
         }
-        return encontrados;
+        var custodias = new HashMap<Long, Custodia>();
+        for (int i = 0; i < ids.size(); i++) {
+            var id = ids.get(i);
+            var valor = valores.get().get(ordenadas.size() + i);
+            if (valor != null) {
+                // Valor fora do formato (outra versão, edição manual) é tratado como ausente
+                Custodia.porCodigo(new String(valor, StandardCharsets.UTF_8))
+                        .ifPresent(custodia -> custodias.put(id, custodia));
+            }
+        }
+        return new LeituraDoCache(encontrados, custodias);
+    }
+
+    @Override
+    public Optional<Custodia> buscar(long idOperacao) {
+        return Optional.ofNullable(buscar(List.of(), List.of(idOperacao)).custodias().get(idOperacao));
+    }
+
+    @Override
+    public void gravar(long idOperacao, Custodia custodia) {
+        gravar(Map.of(), Map.of(idOperacao, custodia));
+    }
+
+    @Override
+    public void gravarTodas(Map<Long, Custodia> custodias) {
+        gravar(Map.of(), custodias);
+    }
+
+    @Override
+    public void remover(long idOperacao) {
+        var chave = bytes(CacheDeCustodia.chave(idOperacao));
+        agendar("DEL", 1, () -> aguardar(List.of(comandos.del(chave)), timeoutComando));
     }
 
     /**
@@ -141,21 +180,30 @@ class ValkeyCacheDeBlocos implements CacheDeBlocos {
      * circuito aberto.
      */
     @Override
-    public void gravar(Map<ChaveDeBloco, byte[]> blocos) {
-        if (blocos.isEmpty() || blocos.size() > maxChavesPorConsulta) {
+    public void gravar(Map<ChaveDeBloco, byte[]> blocos, Map<Long, Custodia> custodias) {
+        var total = blocos.size() + custodias.size();
+        if (total == 0 || total > maxChavesPorConsulta) {
             return;
         }
+        var valores = new ArrayList<Gravacao>(total);
+        blocos.forEach((chave, valor) -> valores.add(new Gravacao(chave.bytes(), valor, ttlEmMilissegundos)));
+        custodias.forEach((id, custodia) -> valores.add(new Gravacao(bytes(CacheDeCustodia.chave(id)),
+                bytes(custodia.codigo()), ttlCustodiaEmMilissegundos)));
+        agendar("SET", total, () -> set(valores));
+    }
+
+    /** Executa {@code comando} fora da requisição, se houver vaga de gravação; senão descarta. */
+    private void agendar(String comando, int chaves, Runnable acao) {
         if (!vagasDeGravacao.tryAcquire()) {
-            log.debug("Gravações no Valkey todas em andamento; {} blocos não gravados", blocos.size());
+            log.debug("Gravações no Valkey todas em andamento; {} chaves não gravadas ({})", chaves, comando);
             return;
         }
-        var copia = List.copyOf(blocos.entrySet());
         var pai = observationRegistry.getCurrentObservation();
         try {
             gravacoes.execute(() -> {
                 try {
-                    executar("SET", pai, () -> {
-                        set(copia);
+                    executar(comando, pai, () -> {
+                        acao.run();
                         return Boolean.TRUE;
                     });
                 } finally {
@@ -167,12 +215,20 @@ class ValkeyCacheDeBlocos implements CacheDeBlocos {
         }
     }
 
+    private static byte[] bytes(String texto) {
+        return texto.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** Um {@code SET chave valor PX ttl}. */
+    private record Gravacao(byte[] chave, byte[] valor, long ttlMilissegundos) {
+    }
+
     /** {@code MGET}s de até {@code chaves-por-comando} chaves em pipeline, esperados juntos. */
-    private List<byte[]> mget(List<ChaveDeBloco> chaves) {
+    private List<byte[]> mget(List<byte[]> chaves) {
         var futuros = new ArrayList<CompletableFuture<List<byte[]>>>();
         for (int inicio = 0; inicio < chaves.size(); inicio += chavesPorComando) {
             var grupo = chaves.subList(inicio, Math.min(inicio + chavesPorComando, chaves.size()));
-            futuros.add(comandos.mget(grupo.stream().map(ChaveDeBloco::bytes).toArray(byte[][]::new)));
+            futuros.add(comandos.mget(grupo.toArray(byte[][]::new)));
         }
         aguardar(futuros, PrazoDaRequisicao.limitar(timeoutComando));
         var valores = new ArrayList<byte[]>(chaves.size());
@@ -187,11 +243,11 @@ class ValkeyCacheDeBlocos implements CacheDeBlocos {
     }
 
     /** {@code SET ... PX} em rodadas de até {@code chaves-por-comando} comandos em pipeline. */
-    private void set(List<Map.Entry<ChaveDeBloco, byte[]>> blocos) {
-        for (int inicio = 0; inicio < blocos.size(); inicio += chavesPorComando) {
+    private void set(List<Gravacao> gravacoes) {
+        for (int inicio = 0; inicio < gravacoes.size(); inicio += chavesPorComando) {
             var futuros = new ArrayList<CompletableFuture<?>>();
-            for (var bloco : blocos.subList(inicio, Math.min(inicio + chavesPorComando, blocos.size()))) {
-                futuros.add(comandos.set(bloco.getKey().bytes(), bloco.getValue(), ttlEmMilissegundos));
+            for (var gravacao : gravacoes.subList(inicio, Math.min(inicio + chavesPorComando, gravacoes.size()))) {
+                futuros.add(comandos.set(gravacao.chave(), gravacao.valor(), gravacao.ttlMilissegundos()));
             }
             aguardar(futuros, timeoutComando);
         }

@@ -11,19 +11,26 @@ import org.springframework.test.web.servlet.client.RestTestClient;
 import org.springframework.web.client.RestClient;
 import org.testcontainers.containers.GenericContainer;
 
+import java.time.LocalDate;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static br.com.consultas.operacoescredito.GatewayMainframeSimulado.PAGINA_VAZIA;
+import static br.com.consultas.operacoescredito.GatewayMainframeSimulado.bloco;
+import static br.com.consultas.operacoescredito.GatewayMainframeSimulado.custodia;
+import static br.com.consultas.operacoescredito.GatewayMainframeSimulado.pagina;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Fan-out da fonte primária em CLIENTE/CONTA com massas próprias registradas no WireMock durante o teste
  * (operações 9100000xx, que não existem na visão consolidada): teto de chamadas simultâneas por requisição,
- * falha de qualquer chamada derrubando a requisição inteira e correlationId em toda chamada filha.
- * Contexto próprio, com teto e timeout de resposta baixos, e sem LocalStack (só a fonte primária é usada).
+ * falha de uma operação deixando só os blocos dela indisponíveis (ADR-0013), lista de uma custódia que falha
+ * (503), listas paginadas em várias custódias com operação repetida (ADR-0012/0016) e correlationId em toda
+ * chamada filha. Contexto próprio, com teto e timeout de resposta baixos, e sem LocalStack (só a fonte primária é
+ * usada). As listas são registradas na custódia SF; nas outras, sem stub, o gateway responde 404 (nenhuma
+ * operação nelas).
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "consultas.fonte-primaria.fan-out.max-chamadas-simultaneas=" + FontePrimariaFanOutIT.TETO,
@@ -36,21 +43,24 @@ class FontePrimariaFanOutIT {
 
     private static final String ROTA = "/v1/operacoes-credito/fonte-primaria";
     private static final String HEADER_CORRELATION_ID = "x-correlationid";
+    private static final String BLOCOS_INDISPONIVEIS = "x-blocos-indisponiveis";
 
     private final RestTestClient client;
     private final GenericContainer<?> wireMock;
+    private final GatewayMainframeSimulado gateway;
 
     @Autowired
     FontePrimariaFanOutIT(RestTestClient client, @Qualifier("wireMock") GenericContainer<?> wireMock) {
         this.client = client;
         this.wireMock = wireMock;
+        this.gateway = new GatewayMainframeSimulado(wireMock);
     }
 
     @Test
     void fanOutRespeitaOTetoDeChamadasSimultaneasPorRequisicao() {
         var ids = List.of(910000001L, 910000002L, 910000003L, 910000004L);
-        registrarLista("/mainframe/clientes/70000000159/operacoes", ids, "2026-01-01");
-        ids.forEach(id -> registrarOperacao(id, 150));
+        registrarLista(custodia("SF") + "/clientes/70000000159/operacoes", ids, "2026-01-01");
+        ids.forEach(id -> gateway.registrarOperacao(id, 150));
         var correlationId = "fp-teto-" + UUID.randomUUID();
 
         consultar("CLIENTE", "cpf_cnpj=70000000159&expand=parcelas", correlationId)
@@ -65,82 +75,115 @@ class FontePrimariaFanOutIT {
     }
 
     @Test
-    void erro5xxEmUmaOperacaoDoFanOutDerrubaARequisicaoInteiraCom502() {
+    void erro5xxEmUmBlocoDeUmaOperacaoDeixaSoEleIndisponivel() {
         var ids = List.of(910000011L, 910000012L, 910000013L);
-        registrarLista("/mainframe/clientes/70000000230/operacoes", ids, "2026-02-01");
-        ids.forEach(id -> registrarOperacao(id, 0));
-        registrarStub("/mainframe/operacoes/910000012/blocos/parcelas", 500, "erro interno no mainframe", 0);
+        registrarLista(custodia("SF") + "/clientes/70000000230/operacoes", ids, "2026-02-01");
+        ids.forEach(id -> gateway.registrarOperacao(id, 0));
+        gateway.registrar(bloco("SF", 910000012L, "parcelas"), 500, "erro interno no mainframe", 0);
 
         consultar("CLIENTE", "cpf_cnpj=70000000230&expand=parcelas", "fp-5xx-" + UUID.randomUUID())
-                .expectStatus().isEqualTo(502)
-                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectStatus().isOk()
+                .expectHeader().valueEquals(BLOCOS_INDISPONIVEIS, "parcelas")
                 .expectBody()
-                .jsonPath("$.status").isEqualTo(502)
-                .jsonPath("$.data").doesNotExist()
-                .jsonPath("$.correlation_id").exists()
-                .jsonPath("$.detail").value(String.class, detail -> assertThat(detail).doesNotContain("erro interno"));
+                .jsonPath("$.data.length()").isEqualTo(3)
+                .jsonPath("$.data[1].operacao.id_operacao").isEqualTo(910000012L)
+                .jsonPath("$.data[1].parcelas").isEqualTo(null)
+                .jsonPath("$.data[0].parcelas").isArray()
+                .jsonPath("$.data[2].parcelas").isArray();
     }
 
     @Test
-    void timeoutEmUmaOperacaoDoFanOutDerrubaARequisicaoInteiraCom504SemEsperarAsDemais() {
+    void timeoutDeUmaTentativaDeixaOBlocoIndisponivelSemEsperarOAtrasoDoGateway() {
         var ids = List.of(910000021L, 910000022L, 910000023L);
-        registrarLista("/mainframe/contas/700000000000002/operacoes", ids, "2026-03-01");
-        ids.forEach(id -> registrarOperacao(id, 0));
-        registrarStub("/mainframe/operacoes/910000022/blocos/parcelas", 200, "000", 3000);
+        registrarLista(custodia("SF") + "/contas/700000000000002/operacoes", ids, "2026-03-01");
+        ids.forEach(id -> gateway.registrarOperacao(id, 0));
+        gateway.registrar(bloco("SF", 910000022L, "parcelas"), 200, PAGINA_VAZIA, 3000);
 
         var inicio = System.nanoTime();
         consultar("CONTA", "conta=700000000000002&expand=parcelas", "fp-timeout-" + UUID.randomUUID())
-                .expectStatus().isEqualTo(504)
-                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectStatus().isOk()
+                .expectHeader().valueEquals(BLOCOS_INDISPONIVEIS, "parcelas")
                 .expectBody()
-                .jsonPath("$.status").isEqualTo(504)
-                .jsonPath("$.data").doesNotExist()
-                .jsonPath("$.detail").value(String.class, detail -> assertThat(detail)
-                        .contains("limite_operacoes", "expand", "OPERACAO"));
+                .jsonPath("$.data[1].parcelas").isEqualTo(null);
         var duracaoMs = (System.nanoTime() - inicio) / 1_000_000;
 
-        assertThat(duracaoMs).as("falha no prazo de resposta, sem esperar o atraso do gateway").isLessThan(2500);
+        assertThat(duracaoMs).as("timeout de resposta de 400 ms, sem esperar o atraso de 3 s").isLessThan(2500);
     }
 
     @Test
-    void erroNaListaDeOperacoesDevolve502() {
-        registrarStub("/mainframe/contas/700000000000003/operacoes", 503, "indisponivel", 0);
+    void erroNaListaDeUmaCustodiaDevolve503ComACustodia() {
+        gateway.registrar(custodia("SF") + "/contas/700000000000003/operacoes", 503, "indisponivel", 0);
 
         consultar("CONTA", "conta=700000000000003", "fp-lista-5xx-" + UUID.randomUUID())
-                .expectStatus().isEqualTo(502)
+                .expectStatus().isEqualTo(503)
+                .expectHeader().exists("Retry-After")
+                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
                 .expectBody()
-                .jsonPath("$.title").isEqualTo("Fonte de dados indisponível");
+                .jsonPath("$.custodias_indisponiveis[0]").isEqualTo("SF")
+                .jsonPath("$.custodias_indisponiveis.length()").isEqualTo(1);
     }
 
     @Test
-    void listaDeOperacoesForaDoLayoutDevolve502() {
-        registrarStub("/mainframe/contas/700000000000004/operacoes", 200, "002000000000910000031", 0);
+    void listaDeOperacoesForaDoLayoutDevolve503ComACustodia() {
+        gateway.registrar(custodia("SF") + "/contas/700000000000004/operacoes", 200, "002000000000910000031", 0);
 
         consultar("CONTA", "conta=700000000000004", "fp-lista-invalida-" + UUID.randomUUID())
-                .expectStatus().isEqualTo(502);
+                .expectStatus().isEqualTo(503)
+                .expectBody()
+                .jsonPath("$.custodias_indisponiveis[0]").isEqualTo("SF");
+    }
+
+    @Test
+    void listasPaginadasDeVariasCustodiasSaoJuntadasEARepetidaFicaComAPrecedencia() {
+        var cpf = "70000000744";
+        var sf = custodia("SF") + "/clientes/" + cpf + "/operacoes";
+        // SF em duas páginas: 910000071 e, na segunda, 910000072; NSF com 910000072 (repetida) e 910000073
+        gateway.registrar(sf, 200, pagina(1, "SF000002", registroDaLista(910000071L, "2026-01-10")), 0);
+        gateway.registrarPagina(sf, "SF000002", 200, pagina(1, null, registroDaLista(910000072L, "2026-02-10")));
+        gateway.registrar(custodia("NSF") + "/clientes/" + cpf + "/operacoes", 200,
+                pagina(2, null, registroDaLista(910000072L, "2026-02-10") + registroDaLista(910000073L, "2026-03-10")),
+                0);
+        gateway.registrarOperacao("SF", 910000071L, 0);
+        gateway.registrarOperacao("SF", 910000072L, 0);
+        gateway.registrarOperacao("NSF", 910000072L, 0);
+        gateway.registrarOperacao("NSF", 910000073L, 0);
+        var correlationId = "fp-paginas-" + UUID.randomUUID();
+
+        consultar("CLIENTE", "cpf_cnpj=" + cpf, correlationId)
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.data[*].operacao.id_operacao").isEqualTo(List.of(910000073, 910000072, 910000071))
+                .jsonPath("$.data[*].operacao.custodia").isEqualTo(List.of("NSF", "NSF", "SF"));
+
+        var comCorrelationId = Map.<String, Object>of(HEADER_CORRELATION_ID, Map.of("equalTo", correlationId));
+        assertThat(contar(sf, comCorrelationId)).as("as duas páginas da SF").isEqualTo(2);
+        assertThat(contar(custodia("SF") + "/operacoes/910000072/.*", comCorrelationId))
+                .as("a repetida é detalhada só na custódia de maior precedência").isZero();
     }
 
     @Test
     void correlationIdChegaATodasAsChamadasFilhasDoFanOut() {
         var ids = List.of(910000041L, 910000042L, 910000043L, 910000044L, 910000045L);
-        registrarLista("/mainframe/clientes/70000000400/operacoes", ids, "2026-04-01");
-        ids.forEach(id -> registrarOperacao(id, 0));
+        registrarLista(custodia("SF") + "/clientes/70000000400/operacoes", ids, "2026-04-01");
+        ids.forEach(id -> gateway.registrarOperacao(id, 0));
         var correlationId = "fp-filhas-" + UUID.randomUUID();
 
         consultar("CLIENTE", "cpf_cnpj=70000000400&expand=parcelas", correlationId)
                 .expectStatus().isOk()
                 .expectHeader().valueEquals(HEADER_CORRELATION_ID, correlationId);
 
-        var rotas = "/mainframe/(clientes/70000000400/operacoes|operacoes/91000004[1-5]/blocos/.*)";
-        assertThat(contar(rotas, Map.of())).isEqualTo(1 + 5 * 3);
+        // A lista nas 4 custódias + 5 operações × 3 blocos
+        var rotas = "/mainframe/custodias/[A-Z0-9]+/(clientes/70000000400/operacoes|operacoes/91000004[1-5]/blocos/.*)";
+        assertThat(contar(rotas, Map.of())).isEqualTo(4 + 5 * 3);
         assertThat(contar(rotas, Map.of(HEADER_CORRELATION_ID, Map.of("equalTo", correlationId))))
-                .isEqualTo(1 + 5 * 3);
+                .isEqualTo(4 + 5 * 3);
     }
 
     @Test
     void operacaoListadaQueNaoExisteMaisNaFontePrimariaFicaForaDaResposta() {
-        registrarLista("/mainframe/clientes/70000000582/operacoes", List.of(910000052L, 910000051L), "2026-05-01");
-        registrarOperacao(910000051L, 0);
+        registrarLista(custodia("SF") + "/clientes/70000000582/operacoes", List.of(910000052L, 910000051L),
+                "2026-05-01");
+        gateway.registrarOperacao(910000051L, 0);
 
         consultar("CLIENTE", "cpf_cnpj=70000000582&expand=parcelas", "fp-sumiu-" + UUID.randomUUID())
                 .expectStatus().isOk()
@@ -150,11 +193,11 @@ class FontePrimariaFanOutIT {
 
     @Test
     void limiteOperacoesPegaAsMaisRecentesMesmoComAListaForaDeOrdem() {
-        registrarStub("/mainframe/clientes/70000000663/operacoes", 200, "003"
-                + registroDaLista(910000061L, "2026-01-10")
-                + registroDaLista(910000062L, "2026-06-10")
-                + registroDaLista(910000063L, "2026-03-10"), 0);
-        List.of(910000061L, 910000062L, 910000063L).forEach(id -> registrarOperacao(id, 0));
+        gateway.registrar(custodia("SF") + "/clientes/70000000663/operacoes", 200, pagina(3, null,
+                registroDaLista(910000061L, "2026-01-10")
+                        + registroDaLista(910000062L, "2026-06-10")
+                        + registroDaLista(910000063L, "2026-03-10")), 0);
+        List.of(910000061L, 910000062L, 910000063L).forEach(id -> gateway.registrarOperacao(id, 0));
         var correlationId = "fp-ordem-" + UUID.randomUUID();
 
         consultar("CLIENTE", "cpf_cnpj=70000000663&limite_operacoes=2", correlationId)
@@ -162,7 +205,7 @@ class FontePrimariaFanOutIT {
                 .expectBody()
                 .jsonPath("$.data[*].operacao.id_operacao").isEqualTo(List.of(910000062, 910000063));
 
-        assertThat(contar("/mainframe/operacoes/910000061/.*",
+        assertThat(contar("/mainframe/custodias/[A-Z0-9]+/operacoes/910000061/.*",
                 Map.of(HEADER_CORRELATION_ID, Map.of("equalTo", correlationId)))).isZero();
     }
 
@@ -173,40 +216,19 @@ class FontePrimariaFanOutIT {
                 .exchange();
     }
 
-    /** Lista de operações do gateway, mais recente primeiro (as datas decrescem um dia por operação). */
+    /** Lista de operações do gateway em uma página, mais recente primeiro (as datas decrescem um dia). */
     private void registrarLista(String rota, List<Long> ids, String dataMaisRecente) {
-        var trancode = new StringBuilder("%03d".formatted(ids.size()));
-        var data = java.time.LocalDate.parse(dataMaisRecente);
+        var registros = new StringBuilder();
+        var data = LocalDate.parse(dataMaisRecente);
         for (var id : ids) {
-            trancode.append(registroDaLista(id, data.toString()));
+            registros.append(registroDaLista(id, data.toString()));
             data = data.minusDays(1);
         }
-        registrarStub(rota, 200, trancode.toString(), 0);
+        gateway.registrar(rota, 200, pagina(ids.size(), null, registros.toString()), 0);
     }
 
     private static String registroDaLista(long id, String data) {
         return "%018d%s".formatted(id, data);
-    }
-
-    /** Blocos {@code operacao}, {@code originacao} e {@code parcelas} (vazio) de uma operação fictícia. */
-    private void registrarOperacao(long id, int atrasoMs) {
-        var base = "/mainframe/operacoes/" + id + "/blocos/";
-        registrarStub(base + "operacao", 200, "%018dATIVA          2026-01-01          70000000159   ".formatted(id), atrasoMs);
-        registrarStub(base + "originacao", 200, "%018dMOBILE              004  ".formatted(id), atrasoMs);
-        registrarStub(base + "parcelas", 200, "000", atrasoMs);
-    }
-
-    private void registrarStub(String url, int status, String corpo, int atrasoMs) {
-        var resposta = new HashMap<String, Object>(Map.of("status", status, "body", corpo,
-                "headers", Map.of("Content-Type", "text/plain; charset=utf-8")));
-        if (atrasoMs > 0) {
-            resposta.put("fixedDelayMilliseconds", atrasoMs);
-        }
-        adminWireMock().post().uri("/__admin/mappings")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(Map.of("request", Map.of("method", "GET", "url", url), "response", resposta))
-                .retrieve()
-                .toBodilessEntity();
     }
 
     private int contar(String urlPathPattern, Map<String, Object> headers) {
@@ -223,7 +245,7 @@ class FontePrimariaFanOutIT {
     private List<long[]> chamadasDeBloco(String correlationId) {
         var resposta = adminWireMock().post().uri("/__admin/requests/find")
                 .contentType(MediaType.APPLICATION_JSON)
-                .body(Map.of("method", "GET", "urlPathPattern", "/mainframe/operacoes/.*",
+                .body(Map.of("method", "GET", "urlPathPattern", "/mainframe/custodias/[A-Z0-9]+/operacoes/.*",
                         "headers", Map.of(HEADER_CORRELATION_ID, Map.of("equalTo", correlationId))))
                 .retrieve()
                 .body(Map.class);

@@ -14,7 +14,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 
 /**
- * Começa a contar o prazo da requisição ({@link PrazoDaRequisicao}) conforme o tipo de consulta, logo depois do
+ * Começa a contar o prazo da requisição ({@link PrazoDaRequisicao}) conforme a rota e o tipo de consulta, logo depois do
  * filtro de contexto e antes de qualquer processamento, e o remove ao final. Sem tipo de consulta válido não há
  * prazo: a requisição termina em 400 antes de ir a qualquer fonte.
  */
@@ -41,7 +41,9 @@ class PrazoDaRequisicaoFilter extends OncePerRequestFilter {
             chain.doFilter(request, response);
             return;
         }
-        PrazoDaRequisicao.iniciar(prazos.de(tipo.get()));
+        var naFontePrimaria = request.getRequestURI()
+                .startsWith(request.getContextPath() + OperacoesCreditoController.CAMINHO_FONTE_PRIMARIA);
+        PrazoDaRequisicao.iniciar(prazos.de(tipo.get(), naFontePrimaria));
         try {
             chain.doFilter(request, response);
         } finally {

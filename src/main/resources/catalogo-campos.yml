@@ -18,13 +18,16 @@ consultas:
           - { nome: data_contratacao_operacao, tipo: data }
           - { nome: data_baixa_operacao, tipo: data, anulavel: true }
           - { nome: cpf_cnpj, tipo: texto }
+          # Custódia em que a operação foi encontrada (SF, F5, OD ou NSF); preenchido pela API, não pela fonte
+          - { nome: custodia, tipo: texto }
 
       - bloco: originacao
         estrutura: objeto
         campos:
           - { nome: id_operacao, tipo: numero }
           - { nome: canal_contratacao, tipo: texto }
-          - { nome: dependencia_contabil, tipo: texto }
+          # A custódia F5 não tem dependência contábil: o campo fica ausente nas operações dela
+          - { nome: dependencia_contabil, tipo: texto, anulavel: true }
 
       - bloco: componentes
         estrutura: lista
