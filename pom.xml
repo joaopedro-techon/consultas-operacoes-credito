@@ -23,6 +23,7 @@
         <archunit.version>1.5.1</archunit.version>
         <rsql-parser.version>2.3.3</rsql-parser.version>
         <resilience4j.version>2.4.0</resilience4j.version>
+        <openapi-request-validator.version>3.0.0</openapi-request-validator.version>
     </properties>
 
     <dependencyManagement>
@@ -169,6 +170,13 @@
             <groupId>com.tngtech.archunit</groupId>
             <artifactId>archunit-junit5</artifactId>
             <version>${archunit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Conformidade das respostas com contrato/openapi.yaml (ADR-0017); antigo swagger-request-validator -->
+        <dependency>
+            <groupId>com.atlassian.oai</groupId>
+            <artifactId>openapi-request-validator-core</artifactId>
+            <version>${openapi-request-validator.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
