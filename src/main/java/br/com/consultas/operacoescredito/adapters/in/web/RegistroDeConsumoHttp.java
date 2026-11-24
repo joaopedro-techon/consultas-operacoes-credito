@@ -33,8 +33,6 @@ class RegistroDeConsumoHttp {
     static final String ATRIBUTO_QUANTIDADE_OPERACOES = RegistroDeConsumoHttp.class.getName() + ".quantidade";
 
     private static final Logger log = LoggerFactory.getLogger(RegistroDeConsumoHttp.class);
-    private static final String ROTA_CONSULTA = "/v1/operacoes-credito";
-    private static final Pattern NUMERO_OPERACAO = Pattern.compile("[1-9]\\d{0,17}");
     private static final Pattern LIMITE = Pattern.compile("\\d{1,9}");
     private static final Pattern CAMPO = Pattern.compile("[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)+");
     /** Código do erro por status: cada status de erro da API vem de um único tipo de falha. */
@@ -60,13 +58,6 @@ class RegistroDeConsumoHttp {
         this.tracer = tracer;
     }
 
-    /** {@code true} para as rotas de consulta (visão consolidada e fonte primária); as demais não geram evento. */
-    static boolean ehConsulta(HttpServletRequest request) {
-        var caminho = request.getRequestURI().substring(request.getContextPath().length());
-        return caminho.equals(ROTA_CONSULTA)
-                || caminho.equals(ROTA_CONSULTA + "/" + OperacoesCreditoController.FONTE_PRIMARIA);
-    }
-
     void registrar(HttpServletRequest request, HttpServletResponse response, Instant inicio, long duracaoMs,
                    String correlationId, CacheDaRequisicao.Contagem cache) {
         try {
@@ -74,9 +65,9 @@ class RegistroDeConsumoHttp {
                     inicio,
                     correlationId,
                     traceId(),
-                    ContextoRequisicaoFilter.consumidor(request),
-                    ContextoRequisicaoFilter.rota(request),
-                    ContextoRequisicaoFilter.tipoConsulta(request),
+                    RequisicaoDeConsulta.consumidor(request),
+                    RequisicaoDeConsulta.rota(request),
+                    RequisicaoDeConsulta.tipoConsulta(request),
                     idOperacao(request.getParameter(ParametrosConsulta.ID_OPERACAO)),
                     informado(request.getParameter(ParametrosConsulta.CPF_CNPJ)),
                     informado(request.getParameter(ParametrosConsulta.CONTA)),
@@ -107,7 +98,7 @@ class RegistroDeConsumoHttp {
     }
 
     private static Long idOperacao(String valor) {
-        return valor != null && NUMERO_OPERACAO.matcher(valor).matches() ? Long.parseLong(valor) : null;
+        return valor != null && ParametrosConsulta.NUMERO_OPERACAO.matcher(valor).matches() ? Long.parseLong(valor) : null;
     }
 
     private static Integer limite(String valor) {
@@ -119,7 +110,7 @@ class RegistroDeConsumoHttp {
     }
 
     private static List<String> blocos(HttpServletRequest request) {
-        return ContextoRequisicaoFilter.blocos(request).stream()
+        return RequisicaoDeConsulta.blocos(request).stream()
                 .filter(nome -> Bloco.porNome(nome).isPresent())
                 .toList();
     }
