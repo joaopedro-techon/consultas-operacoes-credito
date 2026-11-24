@@ -13,12 +13,12 @@ import java.util.Map;
 public interface CacheDeBlocos {
 
     /**
-     * Uma leitura (um {@code MGET}) de todas as chaves.
+     * Uma leitura de todas as chaves (dividida em {@code MGET}s menores em pipeline).
      *
      * @return {@code texto_detalhe} dos blocos em cache; chaves ausentes não aparecem no mapa
      */
     Map<ChaveDeBloco, byte[]> buscar(Collection<ChaveDeBloco> chaves);
 
-    /** Grava os blocos com o TTL configurado. */
+    /** Grava os blocos com o TTL configurado, em best-effort: pode voltar antes de a gravação terminar. */
     void gravar(Map<ChaveDeBloco, byte[]> blocos);
 }

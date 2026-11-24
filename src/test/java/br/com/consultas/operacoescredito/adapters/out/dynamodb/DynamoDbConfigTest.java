@@ -32,6 +32,7 @@ class DynamoDbConfigTest {
     private final AtomicInteger requisicoes = new AtomicInteger();
     private volatile int status;
     private volatile String tipoDoErro;
+    private volatile Duration demora = Duration.ZERO;
     private DynamoDbClient cliente;
 
     @BeforeEach
@@ -40,6 +41,11 @@ class DynamoDbConfigTest {
         servidor.createContext("/", troca -> {
             requisicoes.incrementAndGet();
             troca.getRequestBody().readAllBytes();
+            try {
+                Thread.sleep(demora);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
             var corpo = ("{\"__type\":\"com.amazonaws.dynamodb.v20120810#" + tipoDoErro + "\",\"message\":\"x\"}")
                     .getBytes(StandardCharsets.UTF_8);
             troca.getResponseHeaders().add("Content-Type", "application/x-amz-json-1.0");
@@ -89,6 +95,35 @@ class DynamoDbConfigTest {
     }
 
     @Test
+    void poolEsgotadoEhReconhecidoComoSemConexaoNoPool() throws InterruptedException {
+        status = 500;
+        tipoDoErro = "InternalServerError";
+        demora = Duration.ofMillis(800);
+        var properties = new DynamoDbProperties("t", "sa-east-1", "http://localhost:" + servidor.getAddress().getPort(),
+                new DynamoDbProperties.Credenciais("a", "b"), "gsi-cliente", "gsi-conta", Duration.ofSeconds(5),
+                Duration.ofSeconds(2), 4,
+                new DynamoDbProperties.Pool(1, Duration.ofSeconds(1), Duration.ofMillis(30), Duration.ofSeconds(2),
+                        Duration.ofMinutes(5), Duration.ofSeconds(30)),
+                new DynamoDbProperties.Retry(0, Duration.ofMillis(1), Duration.ofMillis(5)));
+        try (var comUmaConexao = DynamoDbConfig.construirCliente(properties, ObservationRegistry.NOOP)) {
+            var ocupando = Thread.ofVirtual().start(() -> {
+                try {
+                    comUmaConexao.getItem(b -> b.tableName("t").key(java.util.Map.of()));
+                } catch (RuntimeException e) {
+                    // a resposta 500 não interessa: a chamada só ocupa a única conexão
+                }
+            });
+            while (requisicoes.get() == 0) {
+                Thread.sleep(5);
+            }
+
+            assertThatThrownBy(() -> comUmaConexao.getItem(b -> b.tableName("t").key(java.util.Map.of())))
+                    .satisfies(e -> assertThat(ResilienciaDynamoDb.semConexaoNoPool(e)).as(e.toString()).isTrue());
+            ocupando.join();
+        }
+    }
+
+    @Test
     void estrategiaDeRetryTemUmaTentativaMaisAsExtrasConfiguradas() {
         var retry = new DynamoDbProperties.Retry(4, Duration.ofMillis(10), Duration.ofMillis(50));
 
@@ -103,10 +138,49 @@ class DynamoDbConfigTest {
                 .bind("consultas.dynamodb", DynamoDbProperties.class).get();
 
         assertThat(properties.retry().tentativasExtras()).isEqualTo(2);
-        assertThat(properties.pool().maxConexoes()).isEqualTo(100);
+        assertThat(properties.pool().maxConexoes()).isEqualTo(300);
         assertThat(properties.pool().timeoutObterConexao()).isEqualTo(Duration.ofMillis(20));
         assertThat(properties.timeoutTentativa()).isEqualTo(Duration.ofMillis(100));
         assertThat(properties.timeoutChamada()).isEqualTo(Duration.ofSeconds(1));
+        assertThat(properties.maxLotesSimultaneos()).isEqualTo(4);
+    }
+
+    @Test
+    void poolPadraoComportaOPiorCasoDosBulkheadsPadrao() throws IOException {
+        var fontes = new YamlPropertySourceLoader().load("application", new ClassPathResource("application.yml"));
+        var binder = new Binder(ConfigurationPropertySources.from(fontes), new PropertySourcesPlaceholdersResolver(fontes));
+        var properties = binder.bind("consultas.dynamodb", DynamoDbProperties.class).get();
+        int total = binder.bind("resilience4j.bulkhead.instances.dynamodb.max-concurrent-calls", Integer.class).get();
+        int clienteConta = binder.bind("resilience4j.bulkhead.instances.dynamodb-cliente-conta.max-concurrent-calls",
+                Integer.class).get();
+
+        assertThat(DynamoDbConfig.conexoesNecessarias(total, clienteConta, properties.maxLotesSimultaneos()))
+                .isLessThanOrEqualTo(properties.pool().maxConexoes());
+        DynamoDbConfig.validarDimensionamento(properties.pool().maxConexoes(), total, clienteConta,
+                properties.maxLotesSimultaneos());
+    }
+
+    @Test
+    void conexoesNecessariasSomamOperacaoEOsLotesDeClienteEConta() {
+        // 140 OPERACAO com uma conexão cada + 40 CLIENTE/CONTA com até 4 lotes cada
+        assertThat(DynamoDbConfig.conexoesNecessarias(180, 40, 4)).isEqualTo(300);
+        // Bulkhead de CLIENTE/CONTA maior que o total: vale o total
+        assertThat(DynamoDbConfig.conexoesNecessarias(10, 50, 2)).isEqualTo(20);
+    }
+
+    @Test
+    void poolMenorQueOPiorCasoDosBulkheadsFalhaNaSubida() {
+        assertThatThrownBy(() -> DynamoDbConfig.validarDimensionamento(100, 200, 60, 8))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("max-conexoes (100)")
+                .hasMessageContaining("620");
+    }
+
+    @Test
+    void lotesSimultaneosPrecisamSerAoMenosUm() {
+        assertThatThrownBy(() -> new DynamoDbProperties("t", "sa-east-1", null, null, "gsi-cliente", "gsi-conta",
+                Duration.ofSeconds(1), Duration.ofMillis(100), 0, pool(10), retry()))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -118,9 +192,15 @@ class DynamoDbConfigTest {
 
     private static DynamoDbProperties propriedades(String endpoint) {
         return new DynamoDbProperties("t", "sa-east-1", endpoint, new DynamoDbProperties.Credenciais("a", "b"),
-                "gsi-cliente", "gsi-conta", Duration.ofSeconds(5), Duration.ofSeconds(2),
-                new DynamoDbProperties.Pool(10, Duration.ofSeconds(1), Duration.ofSeconds(1), Duration.ofSeconds(2),
-                        Duration.ofMinutes(5), Duration.ofSeconds(30)),
-                new DynamoDbProperties.Retry(2, Duration.ofMillis(1), Duration.ofMillis(5)));
+                "gsi-cliente", "gsi-conta", Duration.ofSeconds(5), Duration.ofSeconds(2), 4, pool(10), retry());
+    }
+
+    private static DynamoDbProperties.Pool pool(int maxConexoes) {
+        return new DynamoDbProperties.Pool(maxConexoes, Duration.ofSeconds(1), Duration.ofSeconds(1),
+                Duration.ofSeconds(2), Duration.ofMinutes(5), Duration.ofSeconds(30));
+    }
+
+    private static DynamoDbProperties.Retry retry() {
+        return new DynamoDbProperties.Retry(2, Duration.ofMillis(1), Duration.ofMillis(5));
     }
 }

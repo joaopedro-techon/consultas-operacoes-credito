@@ -14,12 +14,14 @@ spring:
     timeout-per-shutdown-phase: 30s
   data:
     # Valkey (protocolo Redis): cache por bloco da visão consolidada. Timeout curto: o cache é só otimização
-    # (fail-open), lento é tratado como indisponível e a consulta segue no DynamoDB.
+    # (fail-open), lento é tratado como indisponível e a consulta segue no DynamoDB. Valkey standalone ou
+    # replication group (cluster mode desligado); o código não usa comandos multi-slot além do MGET (ADR-0011).
     redis:
       host: ${CONSULTAS_VALKEY_HOST:localhost}
       port: ${CONSULTAS_VALKEY_PORTA:6379}
       timeout: ${CONSULTAS_VALKEY_TIMEOUT:10ms}
-      connect-timeout: 100ms
+      # Host inalcançável (pacotes descartados) custa no máximo isto por tentativa de conexão, até o circuito abrir
+      connect-timeout: ${CONSULTAS_VALKEY_CONNECT_TIMEOUT:20ms}
       client-name: ${spring.application.name}
       repositories:
         enabled: false
@@ -82,9 +84,13 @@ consultas:
     timeout-chamada: 1s
     # Teto de cada tentativa: uma tentativa presa ainda deixa prazo para o retry do SDK
     timeout-tentativa: ${CONSULTAS_DYNAMODB_TIMEOUT_TENTATIVA:100ms}
-    # Cliente HTTP do SDK (Apache HttpClient 5) com pool próprio
+    # CLIENTE/CONTA: lotes de BatchGetItem (100 chaves) em andamento ao mesmo tempo por consulta
+    max-lotes-simultaneos: ${CONSULTAS_DYNAMODB_MAX_LOTES_SIMULTANEOS:4}
+    # Cliente HTTP do SDK (Apache HttpClient 5) com pool próprio. Comporta o pior caso dos bulkheads (validado na
+    # subida): (dynamodb − dynamodb-cliente-conta) + dynamodb-cliente-conta × max-lotes-simultaneos
+    # = (180 − 40) + 40 × 4 = 300. Sem conexão em timeout-obter-conexao: 503, sem contar no circuito
     pool:
-      max-conexoes: ${CONSULTAS_DYNAMODB_MAX_CONEXOES:100}
+      max-conexoes: ${CONSULTAS_DYNAMODB_MAX_CONEXOES:300}
       timeout-conexao: 100ms
       timeout-obter-conexao: 20ms
       timeout-resposta: 1s
@@ -99,6 +105,14 @@ consultas:
   cache:
     habilitado: ${CONSULTAS_CACHE_HABILITADO:true}
     ttl: ${CONSULTAS_CACHE_TTL:5m}
+    # Leituras e gravações em comandos de até 100 chaves, em pipeline (nenhum comando gigante no Valkey)
+    chaves-por-comando: 100
+    # Consultas com mais chaves (operações × blocos) vão direto ao DynamoDB, sem ler nem gravar no cache
+    max-chaves-por-consulta: ${CONSULTAS_CACHE_MAX_CHAVES_POR_CONSULTA:500}
+    # Sem ao menos isto do prazo da requisição, nem tenta o cache (maior que spring.data.redis.timeout)
+    prazo-minimo-restante: 20ms
+    # Gravações fora da requisição em andamento; acima disso a gravação é descartada
+    max-gravacoes-simultaneas: 32
   # Fonte primária: gateway do mainframe (WireMock no ambiente local); sem cache (ADR-0002)
   fonte-primaria:
     url: ${CONSULTAS_FONTE_PRIMARIA_URL:http://localhost:8089}
@@ -152,7 +166,9 @@ consultas:
 resilience4j:
   circuitbreaker:
     instances:
-      # Visão consolidada: conta cada Query/BatchGetItem depois do retry do SDK; aberto → 503 sem chamar o DynamoDB
+      # Visão consolidada: conta cada Query/BatchGetItem depois do retry do SDK (throttling e UnprocessedKeys
+      # restantes incluídos); aberto → 503 sem chamar o DynamoDB. Não contam: chamadas interrompidas, timeouts
+      # encurtados pelo prazo da requisição, pool de conexões esgotado e 4xx que não são throttling (ADR-0010)
       dynamodb:
         sliding-window-type: COUNT_BASED
         sliding-window-size: 50
@@ -191,13 +207,14 @@ resilience4j:
         permitted-number-of-calls-in-half-open-state: 2
   bulkhead:
     instances:
-      # Consultas simultâneas na visão consolidada (todos os tipos); cheio → 503
+      # Consultas simultâneas na visão consolidada (todos os tipos); cheio → 503. Junto com o de CLIENTE/CONTA e
+      # consultas.dynamodb.max-lotes-simultaneos, define as conexões necessárias no pool (consultas.dynamodb.pool)
       dynamodb:
-        max-concurrent-calls: 200
+        max-concurrent-calls: 180
         max-wait-duration: 0ms
-      # Teto próprio de CLIENTE/CONTA (mais caras), abaixo do total: sempre sobra vaga para OPERACAO
+      # Teto próprio de CLIENTE/CONTA (mais caras), abaixo do total: sempre sobram 140 vagas para OPERACAO
       dynamodb-cliente-conta:
-        max-concurrent-calls: 60
+        max-concurrent-calls: 40
         max-wait-duration: 0ms
       fontePrimaria:
         # Igual ao pool de conexões: acima disso a chamada só esperaria conexão
