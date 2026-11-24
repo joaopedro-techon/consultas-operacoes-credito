@@ -32,7 +32,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Resiliência da visão consolidada observada pela API HTTP, com o DynamoDB (LocalStack) atrás de um Toxiproxy
  * que o teste atrasa ou derruba: prazo por tipo de consulta (504), circuit breaker e rate limiter (503 com
- * {@code Retry-After}) e bulkhead de CLIENTE/CONTA isolado de OPERACAO.
+ * {@code Retry-After}) e bulkhead de CLIENTE/CONTA isolado de OPERACAO. Os 502, 503 e 504 provocados aqui também
+ * são validados contra {@code contrato/openapi.yaml} ({@link ContratoOpenApi}).
  * <p>
  * Prazos maiores que os de produção (150/400 ms) para não depender da velocidade da máquina: o que se verifica
  * é que o prazo configurado para o tipo de consulta é o que vale. Sem cache (default dos testes).
@@ -122,6 +123,7 @@ class ResilienciaVisaoConsolidadaIT {
         assertThat(problema.has("data")).isFalse();
         assertThat(duracaoMs).as("504 no prazo de OPERACAO, sem esperar o DynamoDB")
                 .isBetween((long) PRAZO_OPERACAO_MS, PRAZO_OPERACAO_MS + FOLGA_MS);
+        ContratoOpenApi.assertConforme(resposta);
     }
 
     @ParameterizedTest(name = "{0}")
@@ -140,6 +142,7 @@ class ResilienciaVisaoConsolidadaIT {
         assertThat(problema.get("detail").asString()).contains("limite_operacoes", "expand", "OPERACAO");
         assertThat(duracaoMs).as("504 no prazo de " + tipo)
                 .isBetween((long) PRAZO_CLIENTE_CONTA_MS, PRAZO_CLIENTE_CONTA_MS + FOLGA_MS);
+        ContratoOpenApi.assertConforme(resposta);
     }
 
     @Test
@@ -166,6 +169,7 @@ class ResilienciaVisaoConsolidadaIT {
             } else {
                 statusAntesDeAbrir.add(resposta.getStatus().value());
             }
+            ContratoOpenApi.assertConforme(resposta);
         }
 
         // Falha da dependência (502, ou 504 se o prazo acabar antes) até o circuito abrir
@@ -202,6 +206,7 @@ class ResilienciaVisaoConsolidadaIT {
             }
             assertThat(rejeitadas).isNotEmpty();
             rejeitadas.forEach(resposta -> assertRetryAfterEntre(resposta, 1, 1));
+            rejeitadas.forEach(ContratoOpenApi::assertConforme);
         } finally {
             rateLimiter.changeLimitForPeriod(limiteOriginal);
             Thread.sleep(1_100);
@@ -222,6 +227,7 @@ class ResilienciaVisaoConsolidadaIT {
             var cliente = consultar("CLIENTE", "cpf_cnpj=" + CLIENTE);
             assertThat(cliente.getStatus().value()).isEqualTo(503);
             assertRetryAfterEntre(cliente, 1, 1);
+            ContratoOpenApi.assertConforme(cliente);
             assertThat(consultar("CONTA", "conta=" + CONTA).getStatus().value()).isEqualTo(503);
             assertThat(consultar("OPERACAO", "id_operacao=100000001").getStatus().value()).isEqualTo(200);
         } finally {

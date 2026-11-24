@@ -1,5 +1,7 @@
 # Catálogo de campos (ADR-0005): campos válidos e tipo de cada um, por bloco.
 # Incluir ou remover um campo de bloco = editar este arquivo, sem mudar código.
+# Este arquivo é contrato (ADR-0017): a mudança vale também para o schema bloco.<nome> de contrato/openapi.yaml
+# (ContratoOpenApiCatalogoTest), e o repositório do mainframe lê este caminho da main.
 #
 # bloco:     nome canônico (o mesmo do expand, da chave do JSON e da SK)
 # estrutura: objeto | lista

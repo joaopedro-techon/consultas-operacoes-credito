@@ -312,6 +312,35 @@ Cada requisição às rotas de consulta, com sucesso ou erro, gera um evento de 
   menos 32 bytes, ex.: `openssl rand -base64 48`) e `sqs.url-fila` são obrigatórios (a aplicação não sobe sem
   eles). O segredo nunca aparece no `toString()` das propriedades.
 
+## Contrato HTTP (fonte da verdade)
+
+O contrato das duas rotas (`/v1/operacoes-credito` e `/v1/operacoes-credito/fonte-primaria`) está em dois arquivos
+deste repositório, escritos à mão (contract-first, sem springdoc; ADR-0017):
+
+| Arquivo | Conteúdo | URL raw (lida pelo repositório do mainframe) |
+| --- | --- | --- |
+| [`contrato/openapi.yaml`](contrato/openapi.yaml) | OpenAPI 3.0.3: paths, `x-tipo-consulta`, parâmetros, `x-blocos-indisponiveis`, `x-correlationid`, corpo `{"data": [...]}` com o schema de cada bloco e os Problem Details de 400/404/429/500/502/503/504 (`Retry-After` em 429 e 503) | `https://raw.githubusercontent.com/joaopedro-techon/consultas-operacoes-credito/main/contrato/openapi.yaml` |
+| [`src/main/resources/catalogo-campos.yml`](src/main/resources/catalogo-campos.yml) | Campos de cada bloco, com tipo e `anulavel` (ver [Catálogo de campos](#catálogo-de-campos)) | `https://raw.githubusercontent.com/joaopedro-techon/consultas-operacoes-credito/main/src/main/resources/catalogo-campos.yml` |
+
+**Regra: mudou aqui primeiro, alinha o mainframe em seguida.** Toda mudança de contrato (parâmetro, header, status,
+bloco ou campo) é feita neste repositório, nos dois arquivos, e entra na `main`; o CI do
+`consultas-operacoes-credito-mainframe` baixa os dois da `main` em todo PR e num job diário e falha enquanto o serviço
+dele divergir. Os caminhos acima são estáveis: mudar um deles quebra o CI do outro repositório.
+
+- Os blocos são `Map` dirigidos pelo catálogo (ADR-0005), e o schema reflete isso: cada bloco lista os campos do
+  catálogo com o tipo e a nulidade, mas nenhum campo de bloco é obrigatório (`fields` reduz os blocos e uma custódia
+  pode não ter um campo, como a F5 sem `dependencia_contabil`) e campo fora do catálogo não é recusado
+  (`additionalProperties: true`). Já o envelope é fechado: `{"data": [...]}` e, em cada operação, só as chaves dos
+  blocos, com `operacao` e `originacao` sempre presentes; todo bloco, exceto `operacao`, pode vir `null`.
+- `ContratoOpenApiIT` valida contra o `openapi.yaml` respostas reais da rota da visão consolidada (200 nos três
+  tipos de consulta, com `expand`, `fields`, `filter` e blocos indisponíveis; 400; 404; 502), e o
+  `ResilienciaVisaoConsolidadaIT` valida os 502, 503 e 504 que provoca. Validador:
+  `com.atlassian.oai:openapi-request-validator-core` (antigo `swagger-request-validator`), com toda divergência
+  como erro: status fora do contrato, content type, header obrigatório ausente e corpo fora do schema.
+- `ContratoOpenApiCatalogoTest` garante que os dois arquivos não divergem entre si: cada bloco do catálogo tem
+  `bloco.<nome>` no `openapi.yaml` com a mesma estrutura e exatamente os mesmos campos, tipos e `anulavel`.
+  Incluir um campo no catálogo exige incluí-lo também no `openapi.yaml`.
+
 ## Catálogo de campos
 
 `src/main/resources/catalogo-campos.yml` (importado pelo `application.yml`) declara, para cada bloco, a
