@@ -9,7 +9,7 @@ import java.util.Objects;
  * Observações (span + timer) padronizadas para os adapters. Dois tipos, com nomes e tags fixos para
  * que os dashboards e o tail sampling não dependam de cada adapter:
  * <ul>
- *     <li>{@link #dependencia}: chamada a um sistema externo (DynamoDB, Valkey, fonte primária, SQS).
+ *     <li>{@link #dependencia}: chamada a um sistema externo (DynamoDB, Valkey, SQS).
  *     Métrica {@code consultas.dependencia}, tags {@code dependencia} e {@code operacao};</li>
  *     <li>{@link #etapa}: passo interno da consulta (consulta GSI, batch, fan-out, filtro).
  *     Métrica {@code consultas.etapa}, tag {@code etapa}.</li>

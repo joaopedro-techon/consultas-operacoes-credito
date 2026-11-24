@@ -8,8 +8,7 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Fonte de dados das operações de crédito (visão consolidada ou fonte primária).
- * A rota escolhe qual implementação o caso de uso recebe.
+ * Fonte de dados das operações de crédito: neste serviço, a visão consolidada (DynamoDB).
  */
 public interface FonteDeOperacoes {
 

@@ -8,7 +8,6 @@ import io.github.resilience4j.core.registry.EntryRemovedEvent;
 import io.github.resilience4j.core.registry.EntryReplacedEvent;
 import io.github.resilience4j.core.registry.RegistryEventConsumer;
 import io.github.resilience4j.ratelimiter.RateLimiter;
-import io.github.resilience4j.retry.Retry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
@@ -20,10 +19,9 @@ import java.util.Locale;
 import java.util.function.Consumer;
 
 /**
- * Logs WARN dos eventos de resiliência de todas as instâncias (fonte primária por custódia e rota, DynamoDB,
- * Valkey, SQS), inclusive as criadas depois da subida:
+ * Logs WARN dos eventos de resiliência de todas as instâncias (DynamoDB, Valkey, SQS), inclusive as criadas depois
+ * da subida (não há retry no Resilience4j, só o dos SDKs da AWS):
  * <ul>
- *     <li>toda tentativa de retry: instância, tentativa N de M, espera e motivo; e o retry esgotado;</li>
  *     <li>toda transição de estado do circuit breaker (fechado, aberto, meio-aberto...), com o motivo: taxas de
  *     falha e de lentidão e os limiares, ou o fim da espera no estado aberto;</li>
  *     <li>recusas (circuito aberto, bulkhead cheio, rate limiter sem permissão), amostradas: no máximo uma linha
@@ -52,19 +50,6 @@ class EventosDeResilienciaConfig {
             eventos.onCallNotPermitted(evento -> amostrado("cb:" + evento.getCircuitBreakerName(), suprimidos ->
                     log.warn("Circuit breaker {} {} recusou chamada{}", evento.getCircuitBreakerName(),
                             estado(circuito.getState()), suprimidas(suprimidos))));
-        });
-    }
-
-    @Bean
-    RegistryEventConsumer<Retry> logDeEventosDoRetry() {
-        return consumidor(retry -> {
-            var eventos = retry.getEventPublisher();
-            eventos.onRetry(evento -> log.warn("Retry {}: tentativa {} de {} em {} ms, motivo: {}",
-                    evento.getName(), evento.getNumberOfRetryAttempts() + 1,
-                    retry.getRetryConfig().getMaxAttempts(), evento.getWaitInterval().toMillis(),
-                    descrever(evento.getLastThrowable())));
-            eventos.onError(evento -> log.warn("Retry {} esgotado após {} tentativas, motivo: {}", evento.getName(),
-                    evento.getNumberOfRetryAttempts(), descrever(evento.getLastThrowable())));
         });
     }
 
@@ -111,10 +96,6 @@ class EventosDeResilienciaConfig {
             case HALF_OPEN -> "meio-aberto (HALF_OPEN)";
             default -> estado.name();
         };
-    }
-
-    private static String descrever(Throwable erro) {
-        return erro == null ? "desconhecido" : erro.getClass().getSimpleName() + ": " + erro.getMessage();
     }
 
     private static String suprimidas(long suprimidos) {

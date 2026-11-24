@@ -20,9 +20,9 @@ import java.util.Objects;
  * Exportador que mascara CPF/CNPJ e conta (mesmas regras dos logs, {@link MascaramentoDadosPessoais}) em tudo o que
  * um span leva de texto antes de entregá-lo ao exportador real: nome, atributos, eventos (nome e atributos, como
  * {@code exception.message} e {@code exception.stacktrace} de uma exceção registrada) e descrição do status.
- * Uma exceção do {@code RestClient} traz a URL do gateway ({@code /mainframe/clientes/<cpf_cnpj>/operacoes},
- * {@code /contas/<conta>}) na mensagem e no stack trace, e os spans de erro (do adapter, do cliente HTTP e do
- * servidor) não podem levá-la em claro. Envolve todo {@link SpanExporter} da aplicação
+ * Uma exceção de cliente HTTP pode trazer na mensagem e no stack trace uma URL com o documento ou a conta no
+ * caminho ({@code /clientes/<cpf_cnpj>/operacoes}, {@code /contas/<conta>}), e os spans de erro (do adapter, do
+ * cliente HTTP e do servidor) não podem levá-la em claro. Envolve todo {@link SpanExporter} da aplicação
  * ({@link MascaramentoSpanConfig}), então vale para os spans de qualquer instrumentação, presente ou futura.
  */
 final class MascaramentoSpanExporter implements SpanExporter {

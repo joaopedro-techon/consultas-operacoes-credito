@@ -13,7 +13,7 @@ import java.util.Objects;
  * @param correlationId                 {@code x-correlationid} da requisição
  * @param traceId                       trace W3C da requisição; {@code null} sem tracing
  * @param consumidor                    {@code x-consumidor} (id da API key) ou {@code desconhecido}
- * @param rota                          {@code visao_consolidada} ou {@code fonte_primaria}
+ * @param rota                          sempre {@code visao_consolidada} neste serviço ({@code fonte_primaria} vem do outro serviço, na mesma fila)
  * @param tipoConsulta                  {@code OPERACAO}, {@code CLIENTE}, {@code CONTA}, {@code invalido}; {@code null} se ausente
  * @param idOperacao                    {@code id_operacao} informado e numérico; {@code null} caso contrário
  * @param cpfCnpj                       {@code cpf_cnpj} informado (em claro); {@code null} se ausente

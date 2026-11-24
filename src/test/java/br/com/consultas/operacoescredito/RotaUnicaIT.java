@@ -13,27 +13,26 @@ import org.springframework.test.web.servlet.client.RestTestClient;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Serviço ECS da visão consolidada (ADR-0015): com {@code consultas.rotas-ativas=visao-consolidada}, nada do
- * mainframe sobe (sem gateway, pool, resiliência nem layouts) e a rota da fonte primária responde 404. Sem
- * WireMock no contexto: se algo da fonte primária subisse, a aplicação não teria gateway.
+ * Este serviço só atende a visão consolidada (ADR-0017): uma única fonte de operações e nenhuma propriedade para
+ * escolher rotas. A rota da fonte primária é de outro serviço (o ALB a leva para lá) e, aqui, responde 404 em
+ * Problem Details.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = "consultas.rotas-ativas=visao-consolidada")
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureRestTestClient
 @Import(VisaoConsolidadaContainers.class)
-class RotasAtivasIT {
+class RotaUnicaIT {
 
     private final RestTestClient client;
     private final ApplicationContext contexto;
 
     @Autowired
-    RotasAtivasIT(RestTestClient client, ApplicationContext contexto) {
+    RotaUnicaIT(RestTestClient client, ApplicationContext contexto) {
         this.client = client;
         this.contexto = contexto;
     }
 
     @Test
-    void soAVisaoConsolidadaSobeEAFontePrimariaResponde404() {
+    void soAVisaoConsolidadaSobe() {
         assertThat(contexto.getBeansOfType(FonteDeOperacoes.class)).hasSize(1);
         assertThat(contexto.containsBean("fontePrimaria")).isFalse();
 
@@ -41,10 +40,16 @@ class RotasAtivasIT {
                 .header("x-tipo-consulta", "OPERACAO")
                 .exchange()
                 .expectStatus().isOk();
+    }
+
+    @Test
+    void rotaDaFontePrimariaNaoExisteNesteServico() {
         client.get().uri("/v1/operacoes-credito/fonte-primaria?id_operacao=100000001")
                 .header("x-tipo-consulta", "OPERACAO")
                 .exchange()
                 .expectStatus().isNotFound()
-                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON);
+                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectBody()
+                .jsonPath("$.status").isEqualTo(404);
     }
 }

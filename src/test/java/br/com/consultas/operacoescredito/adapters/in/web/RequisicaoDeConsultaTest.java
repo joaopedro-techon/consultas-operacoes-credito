@@ -14,8 +14,8 @@ class RequisicaoDeConsultaTest {
     @ParameterizedTest
     @CsvSource(textBlock = """
             '',     /v1/operacoes-credito,                      true
-            '',     /v1/operacoes-credito/fonte-primaria,       true
             /app,   /app/v1/operacoes-credito,                  true
+            '',     /v1/operacoes-credito/fonte-primaria,       false
             '',     /v1/operacoes-credito/xyz,                  false
             '',     /v1/operacoes-credito/,                     false
             '',     /v1/operacoes-credito/fonte-primaria/x,     false
@@ -23,7 +23,7 @@ class RequisicaoDeConsultaTest {
             '',     /x/v1/operacoes-credito,                    false
             '',     /actuator/health,                           false
             """)
-    void soAsDuasRotasExatasSaoDeConsulta(String contexto, String uri, boolean consulta) {
+    void soARotaExataEDeConsulta(String contexto, String uri, boolean consulta) {
         var request = new MockHttpServletRequest("GET", uri);
         request.setContextPath(contexto);
 
@@ -31,13 +31,9 @@ class RequisicaoDeConsultaTest {
     }
 
     @ParameterizedTest
-    @CsvSource(textBlock = """
-            /v1/operacoes-credito,                      visao_consolidada
-            /v1/operacoes-credito/fonte-primaria,       fonte_primaria
-            /v1/operacoes-credito/xyz/fonte-primaria,   visao_consolidada
-            """)
-    void rotaSoEFontePrimariaNaRotaExata(String uri, String rota) {
-        assertThat(RequisicaoDeConsulta.rota(new MockHttpServletRequest("GET", uri))).isEqualTo(rota);
+    @ValueSource(strings = {"/v1/operacoes-credito", "/v1/operacoes-credito/fonte-primaria", "/actuator/health"})
+    void rotaESempreAVisaoConsolidada(String uri) {
+        assertThat(RequisicaoDeConsulta.rota(new MockHttpServletRequest("GET", uri))).isEqualTo("visao_consolidada");
     }
 
     @ParameterizedTest

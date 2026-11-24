@@ -27,7 +27,7 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * Proteção própria da visão consolidada, isolada da fonte primária. Nomes das instâncias do Resilience4j (valores
+ * Proteção da visão consolidada. Nomes das instâncias do Resilience4j (valores
  * em {@code resilience4j.*.instances} no {@code application.yml}):
  * <ul>
  *     <li>por consulta, antes de qualquer I/O: bulkhead {@value #BULKHEAD_CLIENTE_CONTA} (só CLIENTE/CONTA, teto
@@ -50,8 +50,8 @@ final class ResilienciaDynamoDb {
     static final String BULKHEAD_CLIENTE_CONTA = "dynamodb-cliente-conta";
 
     /**
-     * Um timeout que dispara com menos que isto do prazo da requisição foi encurtado pelo prazo (o mesmo critério
-     * da fonte primária, ADR-0009).
+     * Um timeout que dispara com menos que isto do prazo da requisição foi encurtado pelo prazo, e não é culpa do
+     * DynamoDB (ADR-0010).
      */
     static final Duration FOLGA_DO_PRAZO = Duration.ofMillis(10);
 
@@ -131,7 +131,7 @@ final class ResilienciaDynamoDb {
 
     /**
      * O que o circuit breaker {@value #NOME} não conta (nem como sucesso nem como falha), no customizer e nos
-     * testes. Mesmo raciocínio do circuito da fonte primária (ADR-0009): só conta o que é culpa do DynamoDB.
+     * testes. Só conta o que é culpa do DynamoDB (ADR-0010).
      */
     static void classificarFalhas(CircuitBreakerConfig.Builder circuito) {
         circuito.ignoreException(ResilienciaDynamoDb::ignoradaPeloCircuito);

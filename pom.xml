@@ -83,11 +83,7 @@
             <artifactId>rsql-parser</artifactId>
             <version>${rsql-parser.version}</version>
         </dependency>
-        <!-- Fonte primária: @HttpExchange sobre RestClient + Apache HttpClient 5 com pool -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-restclient</artifactId>
-        </dependency>
+        <!-- Apache HttpClient 5 do cliente HTTP do SDK (exceções do pool classificadas em ResilienciaDynamoDb) -->
         <dependency>
             <groupId>org.apache.httpcomponents.client5</groupId>
             <artifactId>httpclient5</artifactId>
@@ -97,7 +93,7 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
-        <!-- Resiliência (circuit breaker, bulkhead, rate limiter, retry): registros e métricas configurados por
+        <!-- Resiliência (circuit breaker, bulkhead, rate limiter): registros e métricas configurados por
              application.yml; a decoração é programática, sem anotações nem AOP -->
         <dependency>
             <groupId>io.github.resilience4j</groupId>
@@ -119,16 +115,7 @@
         </dependency>
         <dependency>
             <groupId>io.github.resilience4j</groupId>
-            <artifactId>resilience4j-retry</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.github.resilience4j</groupId>
             <artifactId>resilience4j-micrometer</artifactId>
-        </dependency>
-        <!-- Layouts de trancode em YAML -->
-        <dependency>
-            <groupId>tools.jackson.dataformat</groupId>
-            <artifactId>jackson-dataformat-yaml</artifactId>
         </dependency>
 
         <dependency>

@@ -4,8 +4,9 @@ import java.util.Arrays;
 import java.util.Optional;
 
 /**
- * Custódia em que uma operação de crédito está registrada. O código é o mesmo na SK da visão consolidada, na rota
- * do gateway da fonte primária e no campo {@code custodia} do bloco {@code operacao}. A ordem de declaração não é a
+ * Custódia em que uma operação de crédito está registrada. O código é o mesmo na SK da visão consolidada, no cache de
+ * custódia ({@code custodia:{id_operacao}}, compartilhado com o serviço da fonte primária) e no campo
+ * {@code custodia} do bloco {@code operacao}. A ordem de declaração não é a
  * precedência: ela fica em {@link PrecedenciaDeCustodia}.
  */
 public enum Custodia {
