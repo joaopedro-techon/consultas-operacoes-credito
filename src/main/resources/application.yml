@@ -105,6 +105,26 @@ consultas:
     operacao: ${CONSULTAS_PRAZO_OPERACAO:150ms}
     cliente: ${CONSULTAS_PRAZO_CLIENTE:400ms}
     conta: ${CONSULTAS_PRAZO_CONTA:400ms}
+  # Evento de consumo no SQS, best-effort e assíncrono (ADR-0004); contrato em docs/eventos/evento-consumo.md
+  eventos:
+    habilitado: ${CONSULTAS_EVENTOS_HABILITADO:true}
+    # HMAC-SHA256 de CPF/CNPJ e conta; obrigatório com o evento ligado (vem de um cofre de segredos)
+    segredo-hmac: ${CONSULTAS_EVENTOS_SEGREDO_HMAC:}
+    fila:
+      capacidade: ${CONSULTAS_EVENTOS_CAPACIDADE_FILA:10000}
+      tamanho-lote: 10
+      intervalo-envio: 1s
+      tempo-maximo-drenagem: 10s
+    sqs:
+      url-fila: ${CONSULTAS_EVENTOS_SQS_URL_FILA:}
+      endpoint: ${CONSULTAS_EVENTOS_SQS_ENDPOINT:}
+      regiao: ${AWS_REGION:sa-east-1}
+      credenciais:
+        access-key-id: ${CONSULTAS_EVENTOS_SQS_CREDENCIAIS_ACCESS_KEY_ID:}
+        secret-access-key: ${CONSULTAS_EVENTOS_SQS_CREDENCIAIS_SECRET_ACCESS_KEY:}
+      # Retry só o do SDK (standard, 2 extras) dentro do timeout da chamada
+      timeout-tentativa: 1s
+      timeout-chamada: 3s
 
 # Resiliência por dependência (Resilience4j). A fonte primária tem instâncias próprias ("fontePrimaria"),
 # isoladas da visão consolidada; a classificação das falhas (o que conta no circuito, o que é retentável) fica
@@ -128,12 +148,25 @@ resilience4j:
         wait-duration-in-open-state: 5s
         permitted-number-of-calls-in-half-open-state: 5
         automatic-transition-from-open-to-half-open-enabled: false
+      # Evento de consumo: aberto, o lote é descartado sem chamar o SQS (a consulta nunca é afetada)
+      sqs:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 2
   bulkhead:
     instances:
       fontePrimaria:
         # Igual ao pool de conexões: acima disso a chamada só esperaria conexão
         max-concurrent-calls: 50
         max-wait-duration: 10ms
+      # Envios (SendMessageBatch) simultâneos; sem vaga em 1 s o lote é descartado. Enquanto o drenador espera,
+      # a fila em memória segura os eventos novos
+      sqs:
+        max-concurrent-calls: 4
+        max-wait-duration: 1s
   ratelimiter:
     instances:
       fontePrimaria:
