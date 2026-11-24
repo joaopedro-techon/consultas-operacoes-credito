@@ -59,6 +59,29 @@
             <artifactId>rsql-parser</artifactId>
             <version>${rsql-parser.version}</version>
         </dependency>
+        <!-- Fonte primária: @HttpExchange sobre RestClient + Apache HttpClient 5 com pool -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-restclient</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.httpcomponents.client5</groupId>
+            <artifactId>httpclient5</artifactId>
+        </dependency>
+        <!-- Trace W3C: traceparent recebido continua no RestClient da fonte primária (exportação: ticket #10) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-micrometer-tracing-opentelemetry</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-otel</artifactId>
+        </dependency>
+        <!-- Layouts de trancode em YAML -->
+        <dependency>
+            <groupId>tools.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-yaml</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>

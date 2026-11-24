@@ -17,6 +17,8 @@ A massa é derivada de uma especificação curta (OPERACOES, abaixo) para que os
   um controle final com o IOF ainda devido e não pago;
 - operação LIQUIDADA quando todas as parcelas estão liquidadas, com data_baixa = último recebimento.
 
+Ao final, gera os stubs de trancode da fonte primária com localstack/gerar_trancode.py (requer PyYAML).
+
 Para incluir uma operação, acrescente uma entrada em OPERACOES e rode o script. Várias operações podem
 compartilhar cpf_cnpj e conta (consultas CLIENTE e CONTA). Blocos listados em "sem_blocos" não são
 gerados (bloco indisponível na visão consolidada).
@@ -27,6 +29,8 @@ import pathlib
 import re
 import shutil
 from decimal import ROUND_HALF_EVEN, Decimal
+
+import gerar_trancode
 
 DATA_POSICAO = dt.date(2026, 11, 23)
 CENTAVO = Decimal("0.01")
@@ -95,6 +99,18 @@ OPERACOES = [
             ("2026-11-12T06:00:00", "350.40", "DESCONTO_FOLHA"),
         ],
     },
+]
+
+# Cliente CNPJ numérico com muitas operações na mesma conta: 14 operações x 8 blocos além de "operacao"
+# passam de 100 chaves, então o BatchGetItem das consultas CLIENTE/CONTA precisa de mais de um lote.
+OPERACOES += [
+    {
+        "id": 100000101 + i, "cpf_cnpj": "11222333000181", "conta": "434115000055501",
+        "contratacao": f"{2025 + (8 + i) // 12}-{(8 + i) % 12 + 1:02d}-03", "canal": "AGENCIA",
+        "dependencia": "045", "parcelas": 2, "principal": "1000.00", "taxa": "1.00", "seguro": "0.00",
+        "recebimentos": [],
+    }
+    for i in range(14)
 ]
 
 
@@ -289,6 +305,8 @@ def main():
         for bloco, conteudo in gerar(spec).items():
             diretorio.joinpath(f"{bloco}.json").write_text(para_json(conteudo), encoding="utf-8", newline="\n")
         print(f"{spec['id']} gerada")
+    # Stubs de trancode da fonte primária derivados da mesma massa (mantém as duas fontes coerentes)
+    gerar_trancode.main()
 
 
 if __name__ == "__main__":

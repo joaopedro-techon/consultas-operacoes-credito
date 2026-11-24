@@ -1,6 +1,7 @@
 package br.com.consultas.operacoescredito.adapters.in.web;
 
 import br.com.consultas.operacoescredito.domain.Bloco;
+import br.com.consultas.operacoescredito.domain.CpfCnpj;
 import br.com.consultas.operacoescredito.domain.CriterioConsulta;
 import br.com.consultas.operacoescredito.domain.TipoConsulta;
 
@@ -10,6 +11,7 @@ import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -38,14 +40,49 @@ record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj
 
     private static final Set<TipoConsulta> ACEITAM_LIMITE = Set.of(TipoConsulta.CLIENTE, TipoConsulta.CONTA);
     private static final Pattern NUMERO_OPERACAO = Pattern.compile("[1-9]\\d{0,17}");
+    private static final Pattern DIGITOS = Pattern.compile("\\d+");
+    private static final Pattern LIMITE = Pattern.compile("\\d{1,4}");
 
     CriterioConsulta criterio() {
         var tipo = tipo();
         validarCoerencia(tipo);
         return switch (tipo) {
             case OPERACAO -> new CriterioConsulta.PorOperacao(idOperacaoNumerico());
-            case CLIENTE, CONTA -> throw new TipoConsultaNaoImplementadoException(tipo);
+            case CLIENTE -> new CriterioConsulta.PorCliente(cpfCnpjValido(), limite());
+            case CONTA -> new CriterioConsulta.PorConta(contaValida(), limite());
         };
+    }
+
+    private String cpfCnpjValido() {
+        if (!CpfCnpj.valido(cpfCnpj)) {
+            throw new RequisicaoInvalidaException("Parâmetro " + CPF_CNPJ + " deve ser um CPF (11 dígitos) ou CNPJ "
+                    + "(14 caracteres, numérico ou alfanumérico em maiúsculas) com dígito verificador válido");
+        }
+        return cpfCnpj;
+    }
+
+    private String contaValida() {
+        if (!DIGITOS.matcher(conta).matches()) {
+            throw new RequisicaoInvalidaException("Parâmetro " + CONTA + " deve conter só dígitos");
+        }
+        return conta;
+    }
+
+    /** {@code limite_operacoes} de 1 a 500; ausente devolve todas as operações. */
+    private OptionalInt limite() {
+        if (limiteOperacoes == null) {
+            return OptionalInt.empty();
+        }
+        var invalido = new RequisicaoInvalidaException("Parâmetro " + LIMITE_OPERACOES
+                + " deve ser um inteiro de 1 a " + CriterioConsulta.LIMITE_OPERACOES_MAXIMO);
+        if (!LIMITE.matcher(limiteOperacoes).matches()) {
+            throw invalido;
+        }
+        int limite = Integer.parseInt(limiteOperacoes);
+        if (limite < 1 || limite > CriterioConsulta.LIMITE_OPERACOES_MAXIMO) {
+            throw invalido;
+        }
+        return OptionalInt.of(limite);
     }
 
     /**

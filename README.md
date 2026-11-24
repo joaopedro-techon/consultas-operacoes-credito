@@ -71,7 +71,53 @@ x-blocos-indisponiveis: plano,saldo
 | `x-tipo-consulta` ausente/inválido, `id_operacao` ausente/não numérico, parâmetro incoerente com o tipo (`cpf_cnpj`, `conta` ou `limite_operacoes` em `OPERACAO`; `id_operacao` em `CLIENTE`/`CONTA`) | 400 (Problem Details) |
 | Bloco desconhecido no `expand` (inclusive maiúsculas ou item vazio) | 400 (Problem Details listando os blocos válidos) |
 | `fields` malformado, com bloco desconhecido, bloco fora do `expand` (sem expansão implícita) ou campo fora do catálogo | 400 (Problem Details listando blocos ou campos válidos) |
-| `CLIENTE` ou `CONTA` com parâmetros coerentes | 501 (ainda não disponível) |
+| `CLIENTE`/`CONTA` sem operações | 200 com `{"data": []}` |
+| `cpf_cnpj` que não é CPF (11 dígitos) ou CNPJ (14 caracteres, alfanumérico em maiúsculas) com DV válido; `conta` com caractere não numérico; `limite_operacoes` fora de 1 a 500 | 400 (Problem Details) |
+
+`CLIENTE` (`cpf_cnpj`) e `CONTA` (`conta`) devolvem as operações da mais recente para a mais antiga por data
+de contratação, até `limite_operacoes` (ausente: todas). A leitura segue o ADR-0001: `Query` no GSI esparso
+(`ScanIndexForward=false`, `Limit` = limite, paginada), que já traz o bloco `operacao`, e `BatchGetItem` de
+`originacao` + blocos pedidos em lotes de até 100 chaves, em paralelo (uma virtual thread por lote, com o MDC
+propagado), relendo `UnprocessedKeys` com backoff.
+
+## Fonte primária
+
+`GET /v1/operacoes-credito/fonte-primaria` aceita os mesmos headers e parâmetros e devolve o mesmo corpo da
+visão consolidada; muda só a porta de saída que o caso de uso recebe (Strategy). Sem cache (ADR-0002).
+Por enquanto atende `OPERACAO`; `CLIENTE`/`CONTA` nessa rota respondem 501.
+
+- Gateway do mainframe via `@HttpExchange` (`GatewayMainframeClient`) sobre `RestClient` + Apache HttpClient 5
+  com pool configurável e sem retry próprio. Uma chamada por bloco pedido
+  (`GET /mainframe/operacoes/{id}/blocos/{bloco}`), em paralelo em virtual threads com o contexto da
+  requisição. 404 do gateway: bloco indisponível (`null` + `x-blocos-indisponiveis`); sem o bloco `operacao`,
+  404 da API. Outros erros ou trancode fora do layout: 502 (sem resposta parcial).
+- `x-correlationid` é repassado em toda chamada ao gateway; o `traceparent` (W3C) é propagado pela
+  observação do `RestClient`.
+- Cada trancode é lido por um parser genérico dirigido por `src/main/resources/trancode/layouts/<bloco>.yml`
+  (validados na subida). Mudar o template = editar o YAML:
+
+```yaml
+bloco: saldo
+estrutura: objeto            # objeto: um registro | lista: prefixo de 3 dígitos com a quantidade + registros
+registro:
+  campos:                    # posições fixas; inicio a partir de 1, relativo ao registro
+    - { campo: id_operacao, inicio: 1, tamanho: 18, tipo: numero }
+    - { campo: saldo_devedor_operacao, inicio: 19, tamanho: 15, tipo: decimal, formato: 2 }
+    - { campo: data_posicao_calculo, inicio: 39, tamanho: 10, tipo: data, formato: yyyy-MM-dd }
+  listas:                    # sub-listas após a parte fixa, na ordem declarada, com o mesmo prefixo
+    - campo: saldo_parcelas
+      registro: { campos: [ ... ] }
+```
+
+| `tipo` | `formato` | Conversão |
+| --- | --- | --- |
+| `numero` | — | inteiro com zeros à esquerda |
+| `decimal` | casas implícitas (ex.: `2`) | `BigDecimal` com essa escala |
+| `data` / `data_hora` | padrão do `DateTimeFormatter` | string `yyyy-MM-dd` / `yyyy-MM-ddTHH:mm:ss` |
+| `booleano` | caracteres de verdadeiro e falso (default `SN`) | `true`/`false` |
+| `texto` | — | string sem os brancos das pontas |
+
+Campo todo em branco vira `null`.
 
 ## Catálogo de campos
 
@@ -119,6 +165,7 @@ O `docker-compose.yml` sobe:
 
 - **LocalStack Community `4.14.0`**, a última tag que roda sem auth token (ADR-0003). Uso exclusivo em
   desenvolvimento local: a tag não recebe patches de segurança.
+- **WireMock `3.13.2`** (porta 8089), simulando o gateway do mainframe com os stubs de `wiremock/mappings`.
 - **app**, construída pelo `Dockerfile`.
 
 O script `localstack/init/ready.d/01-visao-consolidada.sh` cria a tabela `operacoes-credito`
@@ -130,7 +177,9 @@ e `indices.env` com os atributos dos GSIs, que vão só no item `OPERACAO`).
 A massa é gerada por `localstack/gerar_massa.py` a partir de uma especificação curta por operação, para que
 os blocos fechem entre si (regras no cabeçalho do script: amortizações aplicadas juros antes do principal,
 saldo = principal + juros - amortizado, IOF dos componentes = soma dos controles de IOF etc.). Para incluir
-uma operação, acrescente uma entrada em `OPERACOES` e rode `python localstack/gerar_massa.py`.
+uma operação, acrescente uma entrada em `OPERACOES` e rode `python localstack/gerar_massa.py`. Ao final ele
+chama `localstack/gerar_trancode.py` (requer PyYAML), que codifica cada `<BLOCO>.json` com o layout de
+trancode do bloco e grava `wiremock/mappings/<id_operacao>.json`: as duas fontes servem a mesma massa.
 
 | `id_operacao` | Situação | CPF/CNPJ | Conta | Cenário |
 | --- | --- | --- | --- | --- |
@@ -140,9 +189,11 @@ uma operação, acrescente uma entrada em `OPERACOES` e rode `python localstack/
 | 100000004 | ATIVA | 12ABC34501DE35 (CNPJ alfanumérico) | 434115000077712 | 10 parcelas, 3 pagas |
 | 100000005 | LIQUIDADA | 12ABC34501DE35 | 434115000077712 | 4 parcelas pagas no vencimento |
 | 100000006 | ATIVA | 11144477735 | 434115000088823 | 8 parcelas, 2 pagas |
+| 100000101 a 100000114 | ATIVA | 11222333000181 | 434115000055501 | 14 operações mensais (2025-09-03 a 2026-10-03), 2 parcelas, sem recebimentos |
 
 O cliente 52998224725 tem três operações em duas contas; a conta 434115000065874 e a 434115000077712 têm
-duas operações cada.
+duas operações cada. O cliente 11222333000181 (e a conta 434115000055501) tem 14 operações: com todos os
+blocos no `expand`, o `BatchGetItem` passa de 100 chaves e é dividido em lotes.
 
 Para rodar a aplicação fora do Docker contra o LocalStack do compose:
 
@@ -161,6 +212,9 @@ CONSULTAS_DYNAMODB_CREDENCIAIS_ACCESS_KEY_ID=test CONSULTAS_DYNAMODB_CREDENCIAIS
 | `consultas.dynamodb.regiao` | `AWS_REGION` | `sa-east-1` |
 | `consultas.dynamodb.endpoint` | `CONSULTAS_DYNAMODB_ENDPOINT` | vazio (endpoint da AWS) |
 | `consultas.dynamodb.credenciais.*` | `CONSULTAS_DYNAMODB_CREDENCIAIS_ACCESS_KEY_ID` / `..._SECRET_ACCESS_KEY` | vazio (cadeia padrão do SDK) |
+| `consultas.fonte-primaria.url` | `CONSULTAS_FONTE_PRIMARIA_URL` | `http://localhost:8089` |
+| `consultas.fonte-primaria.layouts` | — | `classpath:trancode/layouts/` |
+| `consultas.fonte-primaria.pool.*` | — | `max-conexoes` 50, `max-conexoes-por-rota` 50, `ttl` 5m, `keep-alive` 30s, `timeout-conexao` 200ms, `timeout-obter-conexao` 50ms, `timeout-resposta` 1s |
 
 ## Testes
 
@@ -172,6 +226,7 @@ Requer JDK 25 e Docker. `verify` roda:
 
 - testes unitários e ArchUnit (Surefire);
 - testes HTTP de caixa-preta `*IT` (Failsafe), com a aplicação inteira e o LocalStack via Testcontainers,
-  usando a mesma imagem, o mesmo script de init e a mesma massa do docker-compose.
+  usando a mesma imagem, o mesmo script de init e a mesma massa do docker-compose, e o WireMock com os
+  mesmos stubs de trancode (`FontePrimariaIT` compara as duas rotas para cada operação da massa).
 
 O CI (`.github/workflows/ci.yml`) executa `./mvnw -B verify` e constrói a imagem Docker.

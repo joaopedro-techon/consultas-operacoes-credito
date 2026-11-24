@@ -1,0 +1,10 @@
+# Layout do trancode do bloco recebimentos (formato descrito em README.md, "Fonte primária").
+bloco: recebimentos
+estrutura: lista
+registro:
+  campos:
+    - { campo: id_operacao, inicio: 1, tamanho: 18, tipo: numero }
+    - { campo: data_valor_movimento, inicio: 19, tamanho: 19, tipo: data_hora, formato: "yyyy-MM-dd'T'HH:mm:ss" }
+    - { campo: valor_recebido, inicio: 38, tamanho: 15, tipo: decimal, formato: 2 }
+    - { campo: tipo_baixa, inicio: 53, tamanho: 40, tipo: texto }
+    - { campo: motivo_baixa, inicio: 93, tamanho: 30, tipo: texto }

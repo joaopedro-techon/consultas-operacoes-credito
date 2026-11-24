@@ -1,0 +1,10 @@
+# Layout do trancode do bloco operacao (formato descrito em README.md, "Fonte primária").
+bloco: operacao
+estrutura: objeto
+registro:
+  campos:
+    - { campo: id_operacao, inicio: 1, tamanho: 18, tipo: numero }
+    - { campo: situacao_operacao_credito, inicio: 19, tamanho: 15, tipo: texto }
+    - { campo: data_contratacao_operacao, inicio: 34, tamanho: 10, tipo: data, formato: yyyy-MM-dd }
+    - { campo: data_baixa_operacao, inicio: 44, tamanho: 10, tipo: data, formato: yyyy-MM-dd }
+    - { campo: cpf_cnpj, inicio: 54, tamanho: 14, tipo: texto }
