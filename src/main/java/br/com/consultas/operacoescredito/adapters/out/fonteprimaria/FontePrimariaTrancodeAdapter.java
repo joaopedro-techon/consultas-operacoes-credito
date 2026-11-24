@@ -4,6 +4,7 @@ import br.com.consultas.operacoescredito.application.port.out.FalhaNaFonteDeOper
 import br.com.consultas.operacoescredito.application.port.out.FonteDeOperacoes;
 import br.com.consultas.operacoescredito.application.port.out.TempoEsgotadoNaFonteDeOperacoesException;
 import br.com.consultas.operacoescredito.config.observabilidade.Observacoes;
+import br.com.consultas.operacoescredito.config.resiliencia.PrazoDaRequisicao;
 import br.com.consultas.operacoescredito.domain.Bloco;
 import br.com.consultas.operacoescredito.domain.CriterioConsulta;
 import br.com.consultas.operacoescredito.domain.OperacaoConsultada;
@@ -28,6 +29,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
@@ -41,6 +43,8 @@ import java.util.function.Supplier;
  * As chamadas de bloco rodam em paralelo (etapa {@value #ETAPA_FAN_OUT}), em virtual threads com o contexto
  * da requisição (MDC, trace) e no máximo {@code maxChamadasSimultaneas} ao mesmo tempo por requisição.
  * A primeira chamada que falhar derruba a requisição inteira (sem resposta parcial) e interrompe as demais.
+ * Cada chamada passa pela {@link ResilienciaFontePrimaria}, e nada espera além do {@link PrazoDaRequisicao}:
+ * nem a vaga no fan-out, nem a resposta do gateway, nem o fan-out como um todo (504).
  * Bloco inexistente no gateway (404) vem {@code null}; sem o bloco {@code operacao}, a operação não existe.
  */
 final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
@@ -63,18 +67,21 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
     private final GatewayMainframeClient gateway;
     private final LayoutsTrancode layouts;
     private final ObservationRegistry observationRegistry;
+    private final ResilienciaFontePrimaria resiliencia;
     private final int maxChamadasSimultaneas;
     private final ParserTrancode parser = new ParserTrancode();
     private final ContextSnapshotFactory contexto = ContextSnapshotFactory.builder().build();
 
     FontePrimariaTrancodeAdapter(GatewayMainframeClient gateway, LayoutsTrancode layouts,
-                                 ObservationRegistry observationRegistry, int maxChamadasSimultaneas) {
+                                 ObservationRegistry observationRegistry, ResilienciaFontePrimaria resiliencia,
+                                 int maxChamadasSimultaneas) {
         if (maxChamadasSimultaneas < 1) {
             throw new IllegalArgumentException("maxChamadasSimultaneas deve ser ao menos 1");
         }
         this.gateway = gateway;
         this.layouts = layouts;
         this.observationRegistry = observationRegistry;
+        this.resiliencia = Objects.requireNonNull(resiliencia, "resiliencia");
         this.maxChamadasSimultaneas = maxChamadasSimultaneas;
     }
 
@@ -164,7 +171,12 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
     }
 
     private BlocoLido lerBlocoNaVez(Semaphore vagas, long idOperacao, Bloco bloco) throws InterruptedException {
-        vagas.acquire();
+        var restante = PrazoDaRequisicao.restante();
+        if (restante.isEmpty()) {
+            vagas.acquire();
+        } else if (!vagas.tryAcquire(restante.get().toNanos(), TimeUnit.NANOSECONDS)) {
+            throw prazoDaRequisicaoEsgotado("o bloco " + bloco.nome());
+        }
         try {
             var conteudo = chamar(bloco.nome(), "o bloco " + bloco.nome(),
                     () -> gateway.bloco(idOperacao, bloco.nome()))
@@ -176,25 +188,47 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
     }
 
     /**
-     * Uma chamada ao gateway, com span e timer de dependência ({@code operacao} = bloco ou lista); 404 não é erro
-     * e vem vazio. Prazo esgotado (conexão, pool ou resposta) é distinguido das demais falhas.
+     * Uma chamada ao gateway protegida por {@link ResilienciaFontePrimaria} (retry, circuit breaker, rate limiter,
+     * bulkhead); 404 não é erro e vem vazio. Prazo esgotado (conexão, pool, resposta ou prazo da requisição) é
+     * distinguido das demais falhas.
      */
     private Optional<String> chamar(String operacao, String descricao, Supplier<String> chamada) {
-        var observacao = Observacoes.dependencia(observationRegistry, DEPENDENCIA, operacao).start();
-        try (var _ = observacao.openScope()) {
-            return Optional.of(Objects.requireNonNullElse(chamada.get(), ""));
-        } catch (HttpClientErrorException.NotFound e) {
-            return Optional.empty();
+        try {
+            return resiliencia.executar(() -> tentar(operacao, descricao, chamada));
         } catch (RestClientException e) {
-            observacao.error(e);
             var mensagem = "Falha ao consultar " + descricao + " na " + FONTE;
             if (prazoEsgotado(e)) {
                 throw new TempoEsgotadoNaFonteDeOperacoesException(mensagem + ": prazo esgotado", e);
             }
             throw new FalhaNaFonteDeOperacoesException(mensagem, e);
+        }
+    }
+
+    /**
+     * Uma tentativa, com span e timer de dependência próprios ({@code operacao} = bloco ou lista). Não sai se o
+     * prazo da requisição já acabou; o timeout de cada tentativa é limitado ao que resta dele (na fábrica de
+     * requisições do {@code RestClient}).
+     */
+    private Optional<String> tentar(String operacao, String descricao, Supplier<String> chamada) {
+        if (PrazoDaRequisicao.esgotado()) {
+            throw prazoDaRequisicaoEsgotado(descricao);
+        }
+        var observacao = Observacoes.dependencia(observationRegistry, DEPENDENCIA, operacao).start();
+        try (var _ = observacao.openScope()) {
+            return Optional.of(Objects.requireNonNullElse(chamada.get(), ""));
+        } catch (HttpClientErrorException.NotFound e) {
+            return Optional.empty();
+        } catch (RuntimeException e) {
+            observacao.error(e);
+            throw e;
         } finally {
             observacao.stop();
         }
+    }
+
+    private static TempoEsgotadoNaFonteDeOperacoesException prazoDaRequisicaoEsgotado(String descricao) {
+        return new TempoEsgotadoNaFonteDeOperacoesException(
+                "Prazo da requisição esgotado antes de consultar " + descricao + " na " + FONTE);
     }
 
     /** Timeouts de conexão, de obtenção de conexão do pool e de resposta são {@link InterruptedIOException}. */
@@ -207,9 +241,18 @@ final class FontePrimariaTrancodeAdapter implements FonteDeOperacoes {
         return false;
     }
 
+    /** Próxima chamada concluída; sem esperar além do prazo da requisição. */
     private static BlocoLido resultado(ExecutorCompletionService<BlocoLido> concluidas) {
         try {
-            return concluidas.take().get();
+            var restante = PrazoDaRequisicao.restante();
+            if (restante.isEmpty()) {
+                return concluidas.take().get();
+            }
+            var concluida = concluidas.poll(restante.get().toNanos(), TimeUnit.NANOSECONDS);
+            if (concluida == null) {
+                throw prazoDaRequisicaoEsgotado("os blocos");
+            }
+            return concluida.get();
         } catch (ExecutionException e) {
             if (e.getCause() instanceof RuntimeException causa) {
                 throw causa;

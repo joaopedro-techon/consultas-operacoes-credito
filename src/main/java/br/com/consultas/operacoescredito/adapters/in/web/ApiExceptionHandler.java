@@ -2,12 +2,15 @@ package br.com.consultas.operacoescredito.adapters.in.web;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 import br.com.consultas.operacoescredito.application.port.out.FalhaNaFonteDeOperacoesException;
+import br.com.consultas.operacoescredito.application.port.out.FonteDeOperacoesIndisponivelException;
 import br.com.consultas.operacoescredito.application.port.out.TempoEsgotadoNaFonteDeOperacoesException;
 import br.com.consultas.operacoescredito.domain.OperacaoNaoEncontradaException;
 import br.com.consultas.operacoescredito.domain.filtro.FiltroInvalidoException;
@@ -45,6 +48,18 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return problema(HttpStatus.GATEWAY_TIMEOUT, "Fonte de dados sem resposta no prazo",
                 "A fonte de dados não respondeu a tempo; reduza as operações com limite_operacoes, peça menos "
                         + "blocos em expand ou consulte uma operação por vez (x-tipo-consulta: OPERACAO)");
+    }
+
+    /** Circuit breaker aberto, bulkhead cheio ou rate limiter interno: 503 com {@code Retry-After} em segundos. */
+    @ExceptionHandler(FonteDeOperacoesIndisponivelException.class)
+    ResponseEntity<ProblemDetail> fonteIndisponivel(FonteDeOperacoesIndisponivelException e) {
+        LOG.warn("Fonte de operações protegida, chamada recusada: {}", e.getMessage());
+        var segundos = Math.max(1, (e.tenteNovamenteEm().toMillis() + 999) / 1000);
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, Long.toString(segundos))
+                .body(problema(HttpStatus.SERVICE_UNAVAILABLE, "Fonte de dados temporariamente indisponível",
+                        "A fonte de dados está protegida contra sobrecarga ou falhas recentes; tente novamente "
+                                + "depois do tempo indicado em Retry-After"));
     }
 
     @ExceptionHandler(FalhaNaFonteDeOperacoesException.class)
