@@ -166,6 +166,12 @@
             <version>${openapi-request-validator.version}</version>
             <scope>test</scope>
         </dependency>
+        <!-- Leitura do contrato/openapi.yaml e do catalogo-campos.yml no teste de conformidade com o catálogo -->
+        <dependency>
+            <groupId>tools.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-yaml</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
