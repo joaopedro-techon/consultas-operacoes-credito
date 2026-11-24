@@ -66,6 +66,10 @@ Critério de busca: OPERACAO (por `id_operacao`), CLIENTE (por CPF/CNPJ) ou CONT
 **Visão consolidada**:
 Cópia de leitura das operações, otimizada para rapidez e eventualmente consistente com a fonte primária.
 
+**Cache de blocos**:
+Cópia temporária (Valkey, TTL) do `texto_detalhe` de cada bloco de uma operação já lido da visão consolidada, com chave `op:{id_operacao}:{bloco}`. Só otimização: indisponível, a consulta segue no DynamoDB (fail-open). Não guarda a lista de operações de um cliente ou conta e não vale para a fonte primária (ADR-0002).
+_Avoid_: cache de consulta, cache de resposta
+
 **Fonte primária**:
 Sistema de origem das operações (mainframe DB2), consultado quando se precisa do dado sem defasagem.
 _Avoid_: origem (confunde com Originação)

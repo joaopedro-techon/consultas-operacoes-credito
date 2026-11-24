@@ -22,6 +22,7 @@
         <aws-sdk.version>2.59.7</aws-sdk.version>
         <archunit.version>1.5.1</archunit.version>
         <rsql-parser.version>2.3.3</rsql-parser.version>
+        <resilience4j.version>2.4.0</resilience4j.version>
     </properties>
 
     <dependencyManagement>
@@ -73,6 +74,17 @@
             <groupId>org.apache.httpcomponents.client5</groupId>
             <artifactId>httpclient5</artifactId>
         </dependency>
+        <!-- Cache por bloco no Valkey (protocolo Redis, cliente Lettuce) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <!-- Circuit breaker por dependência -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot4</artifactId>
+            <version>${resilience4j.version}</version>
+        </dependency>
         <!-- Layouts de trancode em YAML -->
         <dependency>
             <groupId>tools.jackson.dataformat</groupId>
@@ -107,6 +119,11 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers-localstack</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-toxiproxy</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

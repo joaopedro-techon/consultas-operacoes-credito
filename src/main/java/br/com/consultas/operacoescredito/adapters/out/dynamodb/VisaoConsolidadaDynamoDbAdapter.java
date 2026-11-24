@@ -4,6 +4,8 @@ import io.micrometer.context.ContextExecutorService;
 import io.micrometer.context.ContextSnapshotFactory;
 import io.micrometer.observation.ObservationRegistry;
 import org.springframework.stereotype.Component;
+import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos;
+import br.com.consultas.operacoescredito.adapters.out.cache.ChaveDeBloco;
 import br.com.consultas.operacoescredito.config.observabilidade.Observacoes;
 import br.com.consultas.operacoescredito.application.port.out.FonteDeOperacoes;
 import br.com.consultas.operacoescredito.domain.Bloco;
@@ -35,6 +37,10 @@ import java.util.concurrent.ThreadLocalRandom;
  * OPERACAO lê por chave os blocos pedidos. CLIENTE e CONTA fazem uma {@code Query} no GSI esparso
  * (mais recentes primeiro), que já traz o bloco {@code operacao}, e depois um {@code BatchGetItem}
  * dos demais blocos pedidos, em lotes paralelos de até 100 chaves.
+ * <p>
+ * Os blocos lidos da tabela base passam pelo {@link CacheDeBlocos} (ADR-0002): um {@code MGET} de todas as chaves
+ * operação × bloco, {@code BatchGetItem} só dos ausentes e gravação deles no cache. A {@code Query} no GSI (a lista
+ * de operações do cliente/conta, com o bloco {@code operacao}) nunca é cacheada.
  */
 @Component
 class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
@@ -55,6 +61,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
 
     private final DynamoDbClient dynamoDb;
     private final ObservationRegistry observationRegistry;
+    private final CacheDeBlocos cache;
     private final String tabela;
     private final String indiceCliente;
     private final String indiceConta;
@@ -63,9 +70,10 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     private final ContextSnapshotFactory contexto = ContextSnapshotFactory.builder().build();
 
     VisaoConsolidadaDynamoDbAdapter(DynamoDbClient dynamoDb, DynamoDbProperties properties,
-                                    ObservationRegistry observationRegistry) {
+                                    ObservationRegistry observationRegistry, CacheDeBlocos cache) {
         this.dynamoDb = dynamoDb;
         this.observationRegistry = observationRegistry;
+        this.cache = cache;
         this.tabela = properties.tabela();
         this.indiceCliente = properties.indiceCliente();
         this.indiceConta = properties.indiceConta();
@@ -152,19 +160,54 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     }
 
     /**
-     * Lê os blocos das operações na tabela base, em lotes de até 100 chaves. Mais de um lote: em paralelo,
-     * uma virtual thread por lote, com o contexto da requisição propagado.
+     * Lê os blocos das operações: primeiro do cache (um {@code MGET} com todas as chaves), depois da tabela base
+     * só os ausentes, que são gravados no cache. Bloco inexistente no DynamoDB não é gravado.
      *
      * @return {@code texto_detalhe} por operação e bloco; blocos inexistentes ficam ausentes
      */
     private Map<Long, Map<Bloco, byte[]>> lerBlocos(Collection<Long> idsOperacao, Set<Bloco> blocos) {
-        var chaves = new ArrayList<Map<String, AttributeValue>>();
+        var chaves = new ArrayList<ChaveDeBloco>(idsOperacao.size() * blocos.size());
         for (var idOperacao : idsOperacao) {
             for (var bloco : blocos) {
-                chaves.add(Map.of(
-                        PK, AttributeValue.fromN(Long.toString(idOperacao)),
-                        SK, AttributeValue.fromS(sk(bloco))));
+                chaves.add(new ChaveDeBloco(idOperacao, bloco));
             }
+        }
+        var itens = new HashMap<Long, Map<Bloco, byte[]>>();
+        if (chaves.isEmpty()) {
+            return itens;
+        }
+        var emCache = cache.buscar(chaves);
+        emCache.forEach((chave, textoDetalhe) -> guardar(itens, chave, textoDetalhe));
+
+        var ausentes = chaves.stream().filter(chave -> !emCache.containsKey(chave)).toList();
+        if (ausentes.isEmpty()) {
+            return itens;
+        }
+        var lidos = lerDoDynamoDb(ausentes);
+        var paraGravar = new HashMap<ChaveDeBloco, byte[]>();
+        lidos.forEach((idOperacao, porBloco) -> porBloco.forEach((bloco, textoDetalhe) -> {
+            var chave = new ChaveDeBloco(idOperacao, bloco);
+            paraGravar.put(chave, textoDetalhe);
+            guardar(itens, chave, textoDetalhe);
+        }));
+        cache.gravar(paraGravar);
+        return itens;
+    }
+
+    private static void guardar(Map<Long, Map<Bloco, byte[]>> destino, ChaveDeBloco chave, byte[] textoDetalhe) {
+        destino.computeIfAbsent(chave.idOperacao(), id -> new EnumMap<>(Bloco.class)).put(chave.bloco(), textoDetalhe);
+    }
+
+    /**
+     * Lê os blocos na tabela base, em lotes de até 100 chaves. Mais de um lote: em paralelo, uma virtual thread
+     * por lote, com o contexto da requisição propagado.
+     */
+    private Map<Long, Map<Bloco, byte[]>> lerDoDynamoDb(List<ChaveDeBloco> chavesDeBloco) {
+        var chaves = new ArrayList<Map<String, AttributeValue>>(chavesDeBloco.size());
+        for (var chave : chavesDeBloco) {
+            chaves.add(Map.of(
+                    PK, AttributeValue.fromN(Long.toString(chave.idOperacao())),
+                    SK, AttributeValue.fromS(sk(chave.bloco()))));
         }
         var lotes = new ArrayList<List<Map<String, AttributeValue>>>();
         for (int inicio = 0; inicio < chaves.size(); inicio += CHAVES_POR_LOTE) {

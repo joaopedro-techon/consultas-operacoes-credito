@@ -12,6 +12,17 @@ spring:
       enabled: true
   lifecycle:
     timeout-per-shutdown-phase: 30s
+  data:
+    # Valkey (protocolo Redis): cache por bloco da visão consolidada. Timeout curto: o cache é só otimização
+    # (fail-open), lento é tratado como indisponível e a consulta segue no DynamoDB.
+    redis:
+      host: ${CONSULTAS_VALKEY_HOST:localhost}
+      port: ${CONSULTAS_VALKEY_PORTA:6379}
+      timeout: ${CONSULTAS_VALKEY_TIMEOUT:10ms}
+      connect-timeout: 100ms
+      client-name: ${spring.application.name}
+      repositories:
+        enabled: false
 
 server:
   shutdown: graceful
@@ -32,6 +43,10 @@ management:
     health:
       probes:
         enabled: true
+  health:
+    # Valkey fora não tira a aplicação do ar (fail-open); o estado fica no circuit breaker
+    redis:
+      enabled: false
   # Métricas e traces saem por OTLP (HTTP) para o OpenTelemetry Collector. O endpoint dos traces vem de
   # OTEL_EXPORTER_OTLP_ENDPOINT (mapeado pelo Spring Boot); sem a variável, só as métricas tentam localhost.
   opentelemetry:
@@ -63,6 +78,10 @@ consultas:
     # GSIs esparsos por cliente e por conta (ADR-0001)
     indice-cliente: ${CONSULTAS_DYNAMODB_INDICE_CLIENTE:gsi-cliente}
     indice-conta: ${CONSULTAS_DYNAMODB_INDICE_CONTA:gsi-conta}
+  # Cache por operação e bloco no Valkey, só na visão consolidada (ADR-0002); conexão em spring.data.redis
+  cache:
+    habilitado: ${CONSULTAS_CACHE_HABILITADO:true}
+    ttl: ${CONSULTAS_CACHE_TTL:5m}
   # Fonte primária: gateway do mainframe (WireMock no ambiente local); sem cache (ADR-0002)
   fonte-primaria:
     url: ${CONSULTAS_FONTE_PRIMARIA_URL:http://localhost:8089}
@@ -78,3 +97,15 @@ consultas:
     # CLIENTE/CONTA: teto de chamadas simultâneas ao gateway (operação × bloco) por requisição
     fan-out:
       max-chamadas-simultaneas: ${CONSULTAS_FONTE_PRIMARIA_MAX_CHAMADAS_SIMULTANEAS:16}
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      # Cache por bloco (Valkey): aberto, a consulta vai direto ao DynamoDB sem tentar o Valkey
+      valkey:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 3
