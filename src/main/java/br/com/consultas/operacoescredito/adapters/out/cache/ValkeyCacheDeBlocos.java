@@ -1,5 +1,6 @@
 package br.com.consultas.operacoescredito.adapters.out.cache;
 
+import br.com.consultas.operacoescredito.config.observabilidade.CacheDaRequisicao;
 import br.com.consultas.operacoescredito.config.observabilidade.Observacoes;
 import br.com.consultas.operacoescredito.domain.Bloco;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
@@ -31,7 +32,8 @@ import java.util.function.Supplier;
  * <p>
  * Cada chamada é uma observação {@code consultas.dependencia} ({@code dependencia=valkey},
  * {@code operacao=MGET|SET}); hits e misses por bloco vão para o contador {@code consultas.cache}
- * ({@code bloco}, {@code resultado=hit|miss}).
+ * ({@code bloco}, {@code resultado=hit|miss}) e para a contagem da requisição ({@link CacheDaRequisicao}), que
+ * segue no evento de consumo.
  */
 class ValkeyCacheDeBlocos implements CacheDeBlocos {
 
@@ -80,8 +82,10 @@ class ValkeyCacheDeBlocos implements CacheDeBlocos {
             if (valor != null) {
                 encontrados.put(chave, valor);
                 hits.get(chave.bloco()).increment();
+                CacheDaRequisicao.hit(chave.bloco().nome());
             } else {
                 misses.get(chave.bloco()).increment();
+                CacheDaRequisicao.miss(chave.bloco().nome());
             }
         }
         return encontrados;
