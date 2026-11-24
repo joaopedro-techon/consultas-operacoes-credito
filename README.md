@@ -60,7 +60,14 @@ x-blocos-indisponiveis: plano,saldo
 | `x-tipo-consulta` ausente/inválido, `id_operacao` ausente/não numérico, parâmetro incoerente com o tipo (`cpf_cnpj`, `conta` ou `limite_operacoes` em `OPERACAO`; `id_operacao` em `CLIENTE`/`CONTA`) | 400 (Problem Details) |
 | Bloco desconhecido no `expand` (inclusive maiúsculas ou item vazio) | 400 (Problem Details listando os blocos válidos) |
 | `fields` malformado, com bloco desconhecido, bloco fora do `expand` (sem expansão implícita) ou campo fora do catálogo | 400 (Problem Details listando blocos ou campos válidos) |
-| `CLIENTE` ou `CONTA` com parâmetros coerentes | 501 (ainda não disponível) |
+| `CLIENTE`/`CONTA` sem operações | 200 com `{"data": []}` |
+| `cpf_cnpj` que não é CPF (11 dígitos) ou CNPJ (14 caracteres, alfanumérico em maiúsculas) com DV válido; `conta` com caractere não numérico; `limite_operacoes` fora de 1 a 500 | 400 (Problem Details) |
+
+`CLIENTE` (`cpf_cnpj`) e `CONTA` (`conta`) devolvem as operações da mais recente para a mais antiga por data
+de contratação, até `limite_operacoes` (ausente: todas). A leitura segue o ADR-0001: `Query` no GSI esparso
+(`ScanIndexForward=false`, `Limit` = limite, paginada), que já traz o bloco `operacao`, e `BatchGetItem` de
+`originacao` + blocos pedidos em lotes de até 100 chaves, em paralelo (uma virtual thread por lote, com o MDC
+propagado), relendo `UnprocessedKeys` com backoff.
 
 ## Fonte primária
 
@@ -171,9 +178,11 @@ trancode do bloco e grava `wiremock/mappings/<id_operacao>.json`: as duas fontes
 | 100000004 | ATIVA | 12ABC34501DE35 (CNPJ alfanumérico) | 434115000077712 | 10 parcelas, 3 pagas |
 | 100000005 | LIQUIDADA | 12ABC34501DE35 | 434115000077712 | 4 parcelas pagas no vencimento |
 | 100000006 | ATIVA | 11144477735 | 434115000088823 | 8 parcelas, 2 pagas |
+| 100000101 a 100000114 | ATIVA | 11222333000181 | 434115000055501 | 14 operações mensais (2025-09-03 a 2026-10-03), 2 parcelas, sem recebimentos |
 
 O cliente 52998224725 tem três operações em duas contas; a conta 434115000065874 e a 434115000077712 têm
-duas operações cada.
+duas operações cada. O cliente 11222333000181 (e a conta 434115000055501) tem 14 operações: com todos os
+blocos no `expand`, o `BatchGetItem` passa de 100 chaves e é dividido em lotes.
 
 Para rodar a aplicação fora do Docker contra o LocalStack do compose:
 

@@ -101,6 +101,18 @@ OPERACOES = [
     },
 ]
 
+# Cliente CNPJ numérico com muitas operações na mesma conta: 14 operações x 8 blocos além de "operacao"
+# passam de 100 chaves, então o BatchGetItem das consultas CLIENTE/CONTA precisa de mais de um lote.
+OPERACOES += [
+    {
+        "id": 100000101 + i, "cpf_cnpj": "11222333000181", "conta": "434115000055501",
+        "contratacao": f"{2025 + (8 + i) // 12}-{(8 + i) % 12 + 1:02d}-03", "canal": "AGENCIA",
+        "dependencia": "045", "parcelas": 2, "principal": "1000.00", "taxa": "1.00", "seguro": "0.00",
+        "recebimentos": [],
+    }
+    for i in range(14)
+]
+
 
 def dec(valor):
     """Marca um Decimal para sair como número JSON com a escala original (ex.: 500.00)."""

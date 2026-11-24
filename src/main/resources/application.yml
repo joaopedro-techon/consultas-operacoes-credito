@@ -38,6 +38,9 @@ consultas:
     tabela: ${CONSULTAS_DYNAMODB_TABELA:operacoes-credito}
     regiao: ${AWS_REGION:sa-east-1}
     endpoint: ${CONSULTAS_DYNAMODB_ENDPOINT:}
+    # GSIs esparsos por cliente e por conta (ADR-0001)
+    indice-cliente: ${CONSULTAS_DYNAMODB_INDICE_CLIENTE:gsi-cliente}
+    indice-conta: ${CONSULTAS_DYNAMODB_INDICE_CONTA:gsi-conta}
   # Fonte primária: gateway do mainframe (WireMock no ambiente local); sem cache (ADR-0002)
   fonte-primaria:
     url: ${CONSULTAS_FONTE_PRIMARIA_URL:http://localhost:8089}
