@@ -12,7 +12,7 @@ import org.springframework.stereotype.Component;
  * <ul>
  *     <li>baixa cardinalidade (métricas e span): {@code consumidor}, {@code tipo_consulta}, {@code rota};</li>
  *     <li>alta cardinalidade (só span): {@code correlation_id} e os identificadores da consulta, que
- *     saem mascarados quando são dados pessoais ({@code MascaramentoSpanFilter}).</li>
+ *     saem mascarados quando são dados pessoais ({@code MascaramentoSpanExporter}).</li>
  * </ul>
  * Valores lidos da requisição pelas mesmas regras do {@link ContextoRequisicaoFilter}.
  */
