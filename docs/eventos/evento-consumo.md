@@ -2,7 +2,7 @@
 
 Cada requisição às rotas de consulta (`GET /v1/operacoes-credito` e `GET /v1/operacoes-credito/fonte-primaria`),
 com sucesso ou erro, gera um evento de consumo publicado na fila SQS `consultas-eventos-consumo` (ADR-0004,
-ADR-0007). Um serviço fora deste repositório o leva a Firehose → S3 → Athena. Rotas fora dessas (ex.: `/actuator`)
+ADR-0008). Um serviço fora deste repositório o leva a Firehose → S3 → Athena. Rotas fora dessas (ex.: `/actuator`)
 não geram evento.
 
 A publicação é best-effort: o evento pode se perder (fila em memória cheia, SQS fora, circuito aberto,

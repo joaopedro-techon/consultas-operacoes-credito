@@ -57,6 +57,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>dynamodb</artifactId>
         </dependency>
+        <!-- Cliente HTTP síncrono do SDK (o padrão, aqui explícito para configurar o pool) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>apache5-client</artifactId>
+        </dependency>
         <!-- Evento de consumo (ADR-0004) -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -91,7 +96,7 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
-                <!-- Resiliência (circuit breaker, bulkhead, rate limiter, retry): registros e métricas configurados por
+        <!-- Resiliência (circuit breaker, bulkhead, rate limiter, retry): registros e métricas configurados por
              application.yml; a decoração é programática, sem anotações nem AOP -->
         <dependency>
             <groupId>io.github.resilience4j</groupId>
