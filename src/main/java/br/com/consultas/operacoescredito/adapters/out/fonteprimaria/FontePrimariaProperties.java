@@ -9,14 +9,16 @@ import java.time.Duration;
  * Conexão com a fonte primária (gateway do mainframe).
  *
  * @param url     URL base do gateway
- * @param layouts diretório dos layouts de trancode ({@code <bloco>.yml})
+ * @param layouts diretório dos layouts de trancode ({@code <bloco>.yml} e {@code lista_operacoes.yml})
  * @param pool    pool de conexões do Apache HttpClient 5
+ * @param fanOut  chamadas paralelas ao gateway em uma mesma requisição
  */
 @ConfigurationProperties("consultas.fonte-primaria")
 public record FontePrimariaProperties(
         String url,
         @DefaultValue("classpath:trancode/layouts/") String layouts,
-        @DefaultValue Pool pool) {
+        @DefaultValue Pool pool,
+        @DefaultValue FanOut fanOut) {
 
     /**
      * @param maxConexoes          máximo de conexões abertas no total
@@ -35,5 +37,19 @@ public record FontePrimariaProperties(
             @DefaultValue("200ms") Duration timeoutConexao,
             @DefaultValue("50ms") Duration timeoutObterConexao,
             @DefaultValue("1s") Duration timeoutResposta) {
+    }
+
+    /**
+     * @param maxChamadasSimultaneas teto de chamadas ao gateway em andamento ao mesmo tempo por requisição
+     *                               (operação × bloco); as demais esperam a vez
+     */
+    public record FanOut(@DefaultValue("16") int maxChamadasSimultaneas) {
+
+        public FanOut {
+            if (maxChamadasSimultaneas < 1) {
+                throw new IllegalArgumentException(
+                        "consultas.fonte-primaria.fan-out.max-chamadas-simultaneas deve ser ao menos 1");
+            }
+        }
     }
 }
