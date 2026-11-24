@@ -5,7 +5,6 @@ import io.micrometer.context.ContextSnapshotFactory;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import org.springframework.stereotype.Component;
-import br.com.consultas.operacoescredito.config.RotaAtiva;
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos;
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeCustodia;
 import br.com.consultas.operacoescredito.adapters.out.cache.ChaveDeBloco;
@@ -76,7 +75,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * ({@link VisaoConsolidadaInvalidaException}): 502.
  */
 @Component
-@RotaAtiva(RotaAtiva.Rota.VISAO_CONSOLIDADA)
 class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
 
     static final String PK = "numero_operacao";

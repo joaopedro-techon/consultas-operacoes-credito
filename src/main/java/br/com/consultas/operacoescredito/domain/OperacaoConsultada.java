@@ -13,8 +13,7 @@ import java.util.Set;
  * Uma operação de crédito como devolvida pela consulta: um conteúdo por bloco pedido.
  * O conteúdo é o JSON do bloco já desserializado ({@code Map<String, Object>} para blocos-objeto,
  * {@code List<Map<String, Object>>} para blocos-lista), sem classe Java por campo (ADR-0005).
- * Um bloco pedido mas ausente na fonte, ou que a fonte primária não conseguiu ler (ADR-0013), fica com valor
- * {@code null}: é um bloco indisponível.
+ * Um bloco pedido mas ausente na fonte (ADR-0013) fica com valor {@code null}: é um bloco indisponível.
  */
 public record OperacaoConsultada(Map<Bloco, Object> blocos) {
 

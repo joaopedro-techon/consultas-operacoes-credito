@@ -20,10 +20,8 @@ final class RequisicaoDeConsulta {
     static final String CONSUMIDOR_DESCONHECIDO = "desconhecido";
     static final String INVALIDO = "invalido";
     static final String ROTA_VISAO_CONSOLIDADA = "visao_consolidada";
-    static final String ROTA_FONTE_PRIMARIA = "fonte_primaria";
 
     private static final String CAMINHO_CONSULTA = "/v1/operacoes-credito";
-    private static final String CAMINHO_FONTE_PRIMARIA = CAMINHO_CONSULTA + "/" + OperacoesCreditoController.FONTE_PRIMARIA;
     /**
      * Formato aceito do {@code x-consumidor} (id da API key). Fora dele o valor vira {@value #INVALIDO} em logs,
      * evento e métricas: o header não entra cru em lugar nenhum (cardinalidade e injeção em logs).
@@ -34,15 +32,17 @@ final class RequisicaoDeConsulta {
     private RequisicaoDeConsulta() {
     }
 
-    /** {@code true} só para as duas rotas exatas de consulta (visão consolidada e fonte primária). */
+    /** {@code true} só para a rota exata de consulta. */
     static boolean ehRotaDeConsulta(HttpServletRequest request) {
-        var caminho = caminho(request);
-        return caminho.equals(CAMINHO_CONSULTA) || caminho.equals(CAMINHO_FONTE_PRIMARIA);
+        return caminho(request).equals(CAMINHO_CONSULTA);
     }
 
-    /** {@value #ROTA_FONTE_PRIMARIA} na rota exata da fonte primária; {@value #ROTA_VISAO_CONSOLIDADA} nas demais. */
+    /**
+     * Sempre {@value #ROTA_VISAO_CONSOLIDADA}: este serviço só atende a visão consolidada (ADR-0017). A rota segue em
+     * logs, métricas e evento de consumo porque a fila e os painéis são os mesmos do serviço da fonte primária.
+     */
     static String rota(HttpServletRequest request) {
-        return caminho(request).equals(CAMINHO_FONTE_PRIMARIA) ? ROTA_FONTE_PRIMARIA : ROTA_VISAO_CONSOLIDADA;
+        return ROTA_VISAO_CONSOLIDADA;
     }
 
     /** {@code x-consumidor} sem espaços nas pontas; ausente: {@value #CONSUMIDOR_DESCONHECIDO}; fora do formato: {@value #INVALIDO}. */

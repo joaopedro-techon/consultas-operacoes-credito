@@ -9,7 +9,8 @@ import java.util.regex.Pattern;
  * Mascara CPF/CNPJ e conta em textos de log (LGPD). Quatro regras, aplicadas a todo valor textual:
  * <ol>
  *     <li>campo cujo nome é {@code cpf_cnpj}, {@code cpf}, {@code cnpj} ou {@code conta}: valor inteiro mascarado;</li>
- *     <li>segmentos de rota {@code /clientes/<cpf_cnpj>} e {@code /contas/<conta>} (URLs do gateway do mainframe);</li>
+ *     <li>segmentos de rota {@code /clientes/<cpf_cnpj>} e {@code /contas/<conta>} (URLs com o documento ou a conta
+ *     no caminho, em mensagens de erro de clientes HTTP);</li>
  *     <li>pares {@code chave=valor}, {@code chave==valor} (RSQL) e {@code "chave":"valor"} (JSON) com essas chaves;</li>
  *     <li>CPF ou CNPJ (numérico ou alfanumérico) soltos no texto, com ou sem pontuação, desde que o dígito
  *     verificador seja válido.</li>
@@ -26,7 +27,7 @@ public final class MascaramentoDadosPessoais {
     private static final Pattern PAR_CHAVE_VALOR = Pattern.compile(
             "(?<![A-Za-z0-9])(cpf_cnpj|cpf|cnpj|conta)(\"?\\s*(?:=[a-z]*=|=|:)\\s*\"?)([A-Za-z0-9./-]+)",
             Pattern.CASE_INSENSITIVE);
-    /** Segmento de rota com o documento ou a conta (ex.: URL das listas de operações do gateway do mainframe). */
+    /** Segmento de rota com o documento ou a conta (ex.: URL de uma lista de operações por cliente ou conta). */
     private static final Pattern SEGMENTO_DE_ROTA = Pattern.compile(
             "(/(clientes|contas)/)([A-Za-z0-9.-]+)", Pattern.CASE_INSENSITIVE);
     private static final Pattern DOCUMENTO_SOLTO = Pattern.compile(

@@ -10,8 +10,9 @@ import java.util.regex.Pattern;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * O dashboard do Grafana mostra as duas rotas da API: o filtro de {@code uri} das métricas HTTP não pode deixar de
- * fora a fonte primária, cujo template de URI é {@code /v1/operacoes-credito/{rota}}.
+ * O dashboard do Grafana mostra as duas rotas da API, inclusive a do serviço da fonte primária (outro repositório,
+ * ADR-0017), que publica as mesmas métricas: o filtro de {@code uri} das métricas HTTP não pode deixar de fora o
+ * template de URI dela, {@code /v1/operacoes-credito/{rota}}.
  */
 class DashboardGrafanaTest {
 

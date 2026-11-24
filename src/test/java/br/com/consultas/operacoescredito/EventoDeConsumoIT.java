@@ -43,8 +43,7 @@ import static org.awaitility.Awaitility.await;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureRestTestClient
 @AutoConfigureTracing
-@Import({VisaoConsolidadaContainers.class, FontePrimariaContainers.class, CacheContainers.class,
-        EventosDeConsumoContainers.class})
+@Import({VisaoConsolidadaContainers.class, CacheContainers.class, EventosDeConsumoContainers.class})
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class EventoDeConsumoIT {
 
@@ -299,22 +298,6 @@ class EventoDeConsumoIT {
                 .expectStatus().isOk();
 
         assertThat(textos(evento(correlationId), "blocos_indisponiveis")).containsExactly("plano", "saldo");
-    }
-
-    @Test
-    void consultaNaFontePrimariaIndicaARotaESemCache() {
-        var correlationId = novoCorrelationId();
-
-        client.get().uri(ROTA + "/fonte-primaria?id_operacao=100000001&expand=saldo")
-                .header("x-tipo-consulta", "OPERACAO")
-                .header("x-correlationid", correlationId)
-                .exchange()
-                .expectStatus().isOk();
-
-        var evento = evento(correlationId);
-        assertThat(evento.path("rota").asString()).isEqualTo("fonte_primaria");
-        assertThat(evento.path("cache_hits").properties()).isEmpty();
-        assertThat(evento.path("cache_misses").properties()).isEmpty();
     }
 
     @Test

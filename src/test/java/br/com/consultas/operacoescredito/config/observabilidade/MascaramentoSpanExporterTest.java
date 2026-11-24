@@ -18,8 +18,8 @@ class MascaramentoSpanExporterTest {
 
     private static final String CPF = "52998224725";
     private static final String CONTA = "434115000065874";
-    private static final String URL_CLIENTE = "http://gateway/mainframe/clientes/" + CPF + "/operacoes";
-    private static final String URL_CONTA = "http://gateway/mainframe/contas/" + CONTA + "/operacoes";
+    private static final String URL_CLIENTE = "http://servico/clientes/" + CPF + "/operacoes";
+    private static final String URL_CONTA = "http://servico/contas/" + CONTA + "/operacoes";
 
     private final InMemorySpanExporter destino = InMemorySpanExporter.create();
     private final SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
@@ -41,7 +41,7 @@ class MascaramentoSpanExporterTest {
 
         var exportado = unico();
         assertThat(exportado.toString()).doesNotContain(CPF, CONTA);
-        assertThat(exportado.getName()).isEqualTo("GET http://gateway/mainframe/clientes/529******25/operacoes");
+        assertThat(exportado.getName()).isEqualTo("GET http://servico/clientes/529******25/operacoes");
         assertThat(exportado.getStatus().getStatusCode()).isEqualTo(StatusCode.ERROR);
         assertThat(exportado.getStatus().getDescription()).contains("/contas/***********5874/");
         var evento = exportado.getEvents().getFirst();
@@ -83,14 +83,14 @@ class MascaramentoSpanExporterTest {
 
     @Test
     void spanSemDadoPessoalSaiIgual() {
-        var span = tracerProvider.get("teste").spanBuilder("fonte_primaria operacao").startSpan();
-        span.setAttribute("dependencia", "fonte_primaria");
+        var span = tracerProvider.get("teste").spanBuilder("servico operacao").startSpan();
+        span.setAttribute("dependencia", "servico");
         span.setStatus(StatusCode.OK);
         span.end();
 
         var exportado = unico();
-        assertThat(exportado.getName()).isEqualTo("fonte_primaria operacao");
-        assertThat(exportado.getAttributes().get(AttributeKey.stringKey("dependencia"))).isEqualTo("fonte_primaria");
+        assertThat(exportado.getName()).isEqualTo("servico operacao");
+        assertThat(exportado.getAttributes().get(AttributeKey.stringKey("dependencia"))).isEqualTo("servico");
         assertThat(exportado.getStatus().getStatusCode()).isEqualTo(StatusCode.OK);
     }
 

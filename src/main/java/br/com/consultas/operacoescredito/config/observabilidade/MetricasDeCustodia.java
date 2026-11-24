@@ -12,14 +12,15 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
- * Métricas da descoberta de custódia (ADR-0012), nas duas rotas:
+ * Métricas da descoberta de custódia (ADR-0012). A tag {@code rota} existe porque o serviço da fonte primária
+ * publica as mesmas métricas (ADR-0017):
  * <ul>
  *     <li>{@value #DESCOBERTA}: uma contagem por custódia consultada, com {@code rota}, {@code custodia} e
  *     {@code resultado} ({@code encontrada}, {@code nao_encontrada}, {@code indisponivel}) e uma por consulta em
  *     que a custódia veio do cache ({@code resultado=cache});</li>
  *     <li>{@value #DUPLICADA}: operação encontrada em mais de uma custódia, com {@code rota} (e log WARN).</li>
  * </ul>
- * Cardinalidade baixa: 2 rotas × 4 custódias × 4 resultados.
+ * Cardinalidade baixa: 4 custódias × 4 resultados.
  */
 public final class MetricasDeCustodia {
 
@@ -40,7 +41,7 @@ public final class MetricasDeCustodia {
     private final MeterRegistry registry;
     private final String rota;
 
-    /** @param rota valor da tag {@code rota} ({@code visao_consolidada} ou {@code fonte_primaria}) */
+    /** @param rota valor da tag {@code rota} (aqui, {@code visao_consolidada}) */
     public MetricasDeCustodia(MeterRegistry registry, String rota) {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.rota = Objects.requireNonNull(rota, "rota");

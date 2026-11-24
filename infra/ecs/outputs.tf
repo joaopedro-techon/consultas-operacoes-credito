@@ -17,8 +17,3 @@ output "log_groups" {
   description = "Log group do CloudWatch por servico."
   value       = { for nome, lg in aws_cloudwatch_log_group.this : nome => lg.name }
 }
-
-output "fonte_primaria_chamadas_por_segundo_por_task" {
-  description = "Cota local de cada task da fonte primaria (cota / max_tasks, ADR-0015). E o limit-for-period efetivo do rate limiter fontePrimaria por segundo."
-  value       = floor(var.fonte_primaria.cota_chamadas_por_segundo / var.fonte_primaria.max_tasks)
-}

@@ -1,9 +1,12 @@
 # Contrato: evento de consumo (`versao_evento` 1)
 
-Cada requisição às rotas de consulta (`GET /v1/operacoes-credito` e `GET /v1/operacoes-credito/fonte-primaria`),
-com sucesso ou erro, gera um evento de consumo publicado na fila SQS `consultas-eventos-consumo` (ADR-0004,
-ADR-0008). Um serviço fora deste repositório o leva a Firehose → S3 → Athena. Rotas fora dessas (ex.: `/actuator`)
-não geram evento.
+Cada requisição à rota de consulta deste serviço (`GET /v1/operacoes-credito`), com sucesso ou erro, gera um
+evento de consumo publicado na fila SQS `consultas-eventos-consumo` (ADR-0004, ADR-0008). Um serviço fora deste
+repositório o leva a Firehose → S3 → Athena. Rotas fora dessa (ex.: `/actuator`) não geram evento.
+
+O serviço da fonte primária (`GET /v1/operacoes-credito/fonte-primaria`, repositório
+`consultas-operacoes-credito-mainframe`) publica o mesmo evento, com este schema, na mesma fila; o campo `rota`
+distingue os dois (ADR-0017). Mudanças neste contrato são coordenadas entre os dois repositórios.
 
 A publicação é best-effort: o evento pode se perder (fila em memória cheia, SQS fora, circuito aberto,
 encerramento). As perdas são contadas em `eventos.consumo.descartados`. Use o evento para perguntas de negócio
@@ -29,7 +32,7 @@ exata.
 | `correlation_id` | texto | sim | `x-correlationid` recebido ou gerado (o mesmo devolvido na resposta) |
 | `trace_id` | texto (32 hex) | não | Trace W3C da requisição |
 | `consumidor` | texto | sim | `x-consumidor` (id da API key no API Gateway) sem espaços nas pontas; `desconhecido` se ausente; `invalido` se fora de `[A-Za-z0-9._-]{1,64}` (o mesmo valor de logs e métricas) |
-| `rota` | texto | sim | `visao_consolidada` ou `fonte_primaria` |
+| `rota` | texto | sim | `visao_consolidada` (este serviço) ou `fonte_primaria` (serviço da fonte primária) |
 | `tipo_consulta` | texto | não | `OPERACAO`, `CLIENTE`, `CONTA` ou `invalido`; fora se o header não veio |
 | `id_operacao` | inteiro | não | `id_operacao` informado, se numérico |
 | `cpf_cnpj_hmac` | texto (64 hex) | não | HMAC-SHA256 do `cpf_cnpj` informado, sem `.`, `-` e `/` quando o resto é um CPF/CNPJ válido (ver abaixo) |

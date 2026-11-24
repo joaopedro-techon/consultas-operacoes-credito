@@ -5,9 +5,9 @@ Uso: python localstack/gerar_massa.py
 Cada operação tem localstack/massa/<id_operacao>/indices.env (CPF/CNPJ e conta, atributos dos GSIs) e um
 diretório por custódia em que está registrada (SF, F5, OD, NSF; ADR-0012). Uma operação duplicada tem os
 mesmos blocos em mais de uma custódia; a API escolhe a vencedora pela precedência NSF > SF > F5 > OD.
-Particularidades das custódias (iguais às dos layouts em src/main/resources/trancode/layouts/<CUSTODIA>/):
+Particularidades das custódias:
 - F5 não tem dependencia_contabil no bloco ORIGINACAO (o campo fica ausente no JSON);
-- OD e NSF têm o mesmo JSON da base (as diferenças delas são só de posição no trancode).
+- OD e NSF têm o mesmo JSON da base.
 
 A massa é derivada de uma especificação curta (OPERACOES, abaixo) para que os blocos fechem entre si:
 
@@ -24,8 +24,6 @@ A massa é derivada de uma especificação curta (OPERACOES, abaixo) para que os
   um controle final com o IOF ainda devido e não pago;
 - operação LIQUIDADA quando todas as parcelas estão liquidadas, com data_baixa = último recebimento.
 
-Ao final, gera os stubs de trancode da fonte primária com localstack/gerar_trancode.py (requer PyYAML).
-
 Para incluir uma operação, acrescente uma entrada em OPERACOES e rode o script. Várias operações podem
 compartilhar cpf_cnpj e conta (consultas CLIENTE e CONTA). Blocos listados em "sem_blocos" não são
 gerados (bloco indisponível na visão consolidada). "custodias" lista as custódias da operação (default SF);
@@ -38,8 +36,6 @@ import pathlib
 import re
 import shutil
 from decimal import ROUND_HALF_EVEN, Decimal
-
-import gerar_trancode
 
 DATA_POSICAO = dt.date(2026, 11, 23)
 CENTAVO = Decimal("0.01")
@@ -114,8 +110,8 @@ OPERACOES = [
         "variacoes": {"NSF": {"situacao_operacao_credito": "ATIVA_NSF"}},
     },
     {
-        # 75 parcelas, 34 pagas no vencimento: blocos-lista com mais de uma página no trancode (até 30
-        # ocorrências por página): parcelas e controles_iof em 3 páginas, amortizações e recebimentos em 2
+        # 75 parcelas, 34 pagas no vencimento: blocos-lista grandes (parcelas, controles_iof, amortizações e
+        # recebimentos com dezenas de ocorrências)
         "id": 100000007, "custodias": ["F5"], "cpf_cnpj": "39053344705", "conta": "434115000070007",
         "contratacao": "2024-01-15", "canal": "AGENCIA", "dependencia": "004",
         "parcelas": 75, "principal": "7500.00", "taxa": "1.00", "seguro": "150.00",
@@ -340,8 +336,6 @@ def main():
             for bloco, conteudo in blocos.items():
                 pasta.joinpath(f"{bloco}.json").write_text(para_json(conteudo), encoding="utf-8", newline="\n")
         print(f"{spec['id']} gerada ({', '.join(custodias)})")
-    # Stubs de trancode da fonte primária derivados da mesma massa (mantém as duas fontes coerentes)
-    gerar_trancode.main()
 
 
 if __name__ == "__main__":

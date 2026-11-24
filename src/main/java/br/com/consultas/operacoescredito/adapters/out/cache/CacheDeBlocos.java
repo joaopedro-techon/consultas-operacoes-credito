@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Cache por operação e bloco da visão consolidada (ADR-0002: a fonte primária não usa cache de dados).
+ * Cache por operação e bloco da visão consolidada (ADR-0002).
  * O valor é o {@code texto_detalhe} (JSON em GZIP) exatamente como veio do DynamoDB. Na mesma leitura (um só
  * {@code MGET}) vêm também as custódias das operações (cache de custódia, ADR-0012), sem ida extra ao Valkey.
  * <p>

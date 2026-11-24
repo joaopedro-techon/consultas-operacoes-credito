@@ -1,8 +1,0 @@
-# Layout do trancode do bloco originacao (formato descrito em README.md, "Fonte primária").
-bloco: originacao
-estrutura: objeto
-registro:
-  campos:
-    - { campo: id_operacao, inicio: 1, tamanho: 18, tipo: numero }
-    - { campo: canal_contratacao, inicio: 19, tamanho: 20, tipo: texto }
-    - { campo: dependencia_contabil, inicio: 39, tamanho: 5, tipo: texto }

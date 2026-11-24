@@ -17,7 +17,6 @@ ambiente = {
   CONSULTAS_AMBIENTE             = "prd"
   CONSULTAS_DYNAMODB_TABELA      = "operacoes-credito"
   CONSULTAS_VALKEY_HOST          = "consultas.xxxxxx.ng.0001.sae1.cache.amazonaws.com"
-  CONSULTAS_FONTE_PRIMARIA_URL   = "https://gateway-mainframe.interno.exemplo"
   CONSULTAS_EVENTOS_SQS_URL_FILA = "https://sqs.sa-east-1.amazonaws.com/123456789012/consultas-eventos-consumo"
   OTEL_EXPORTER_OTLP_ENDPOINT    = "http://otel-collector.interno.exemplo:4318"
 }
@@ -34,13 +33,4 @@ visao_consolidada = {
   max_tasks                        = 150
   alvo_requisicoes_por_task_minuto = 33000 # 550 req/s por task x 60
   alvo_cpu                         = 60
-}
-
-fonte_primaria = {
-  cpu                              = 1024
-  memory                           = 2048
-  min_tasks                        = 2
-  max_tasks                        = 3    # tambem vira CONSULTAS_FONTE_PRIMARIA_COTA_MAX_TASKS
-  cota_chamadas_por_segundo        = 1500 # cota do mainframe para TODAS as tasks
-  alvo_requisicoes_por_task_minuto = 1500 # 25 req/s por task x 60
 }

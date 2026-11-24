@@ -7,8 +7,8 @@ import java.util.Optional;
 
 /**
  * Cache de custódia (ADR-0012): em qual custódia cada operação foi encontrada, com chave
- * {@code custodia:{id_operacao}}. Guarda só o endereço, nunca dados da operação; por isso vale também para a fonte
- * primária. Fail-open como o cache de blocos: falha equivale a "não sei" (refaz a descoberta) e a "não gravado".
+ * {@code custodia:{id_operacao}}. Guarda só o endereço, nunca dados da operação. Chave, valor e TTL são contrato
+ * com o serviço da fonte primária, que usa o mesmo Valkey (ADR-0017): só mudam de forma coordenada. Fail-open como o cache de blocos: falha equivale a "não sei" (refaz a descoberta) e a "não gravado".
  * A visão consolidada lê a custódia no mesmo {@code MGET} dos blocos ({@link CacheDeBlocos#buscar}).
  */
 public interface CacheDeCustodia {

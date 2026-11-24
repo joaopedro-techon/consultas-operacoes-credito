@@ -19,10 +19,8 @@ import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureRestTe
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
-import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.client.EntityExchangeResult;
 import org.springframework.test.web.servlet.client.RestTestClient;
-import org.springframework.web.client.RestClient;
 import org.testcontainers.containers.GenericContainer;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -57,12 +55,11 @@ import static org.awaitility.Awaitility.await;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureRestTestClient
-@Import({VisaoConsolidadaContainers.class, FontePrimariaContainers.class, CacheContainers.class})
+@Import({VisaoConsolidadaContainers.class, CacheContainers.class})
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CacheIT {
 
     private static final String ROTA = "/v1/operacoes-credito";
-    private static final String ROTA_FONTE_PRIMARIA = "/v1/operacoes-credito/fonte-primaria";
     private static final String HEADER_INDISPONIVEIS = "x-blocos-indisponiveis";
     private static final String TODOS_OS_BLOCOS =
             "componentes,parcelas,amortizacoes,recebimentos,plano,saldo,controles_iof";
@@ -77,7 +74,6 @@ class CacheIT {
     private final Proxy proxyValkey;
     private final CircuitBreakerRegistry circuitBreakers;
     private final LettuceConnectionFactory conexoesDaAplicacao;
-    private final GenericContainer<?> wireMock;
     private final RedisClient valkeyClient;
     private final StatefulRedisConnection<byte[], byte[]> valkey;
     /** Itens do DynamoDB alterados pelo teste, com o original (vazio: não existia), restaurados ao final. */
@@ -86,14 +82,12 @@ class CacheIT {
 
     @Autowired
     CacheIT(RestTestClient client, DynamoDbClient dynamoDb, Proxy proxyValkey, CircuitBreakerRegistry circuitBreakers,
-            LettuceConnectionFactory conexoesDaAplicacao, @Qualifier("valkey") GenericContainer<?> valkeyContainer,
-            @Qualifier("wireMock") GenericContainer<?> wireMock) {
+            LettuceConnectionFactory conexoesDaAplicacao, @Qualifier("valkey") GenericContainer<?> valkeyContainer) {
         this.client = client;
         this.dynamoDb = dynamoDb;
         this.proxyValkey = proxyValkey;
         this.circuitBreakers = circuitBreakers;
         this.conexoesDaAplicacao = conexoesDaAplicacao;
-        this.wireMock = wireMock;
         this.valkeyClient = RedisClient.create(CacheContainers.uriDireta(valkeyContainer));
         this.valkey = valkeyClient.connect(ByteArrayCodec.INSTANCE);
     }
@@ -103,6 +97,12 @@ class CacheIT {
         // Gravações no cache saem fora da requisição: as do teste anterior terminam (ou desistem no timeout de
         // comando, 10 ms) antes de limpar o Valkey
         Thread.sleep(100);
+        restaurarValkey();
+        valkey.sync().flushall();
+    }
+
+    /** Proxy sem toxics e ligado, conexão da aplicação refeita e circuito {@code valkey} fechado. */
+    private void restaurarValkey() throws IOException {
         for (var toxic : proxyValkey.toxics().getAll()) {
             toxic.remove();
         }
@@ -110,7 +110,6 @@ class CacheIT {
         // Reconexão imediata (sem esperar o backoff do Lettuce) depois de um teste com o Valkey fora
         conexoesDaAplicacao.resetConnection();
         circuitBreakers.circuitBreaker("valkey").reset();
-        valkey.sync().flushall();
     }
 
     @AfterEach
@@ -122,7 +121,10 @@ class CacheIT {
     }
 
     @AfterAll
-    void fecharValkey() {
+    void fecharValkey() throws IOException {
+        // O contexto (com o proxy) é reaproveitado por outras classes com os mesmos containers, como o
+        // LogDeAcessoComCacheIT: o Valkey não pode ficar fora depois do último teste
+        restaurarValkey();
         valkey.close();
         valkeyClient.shutdown();
     }
@@ -222,23 +224,6 @@ class CacheIT {
         assertThat(segunda.get(1)).isEqualTo(primeira.get(0));
         aguardarNoCache("op:900000006:originacao");
         assertThat(valkey.sync().exists(chave("op:100000006:operacao"))).as("operacao vem do GSI").isZero();
-    }
-
-    @Test
-    void rotaDaFontePrimariaNaoUsaOCacheDeBlocosMasUsaODeCustodia() {
-        consultarOperacao("100000002", "parcelas");
-        aguardarNoCache("op:100000002:parcelas", "custodia:100000002");
-        var chamadasAntes = chamadasAoGateway("100000002");
-
-        client.get().uri(ROTA_FONTE_PRIMARIA + "?id_operacao=100000002&expand=parcelas,saldo")
-                .header("x-tipo-consulta", "OPERACAO")
-                .exchange()
-                .expectStatus().isOk();
-
-        // Um GET por bloco no gateway, mesmo com operacao, originacao e parcelas em cache, só na custódia lembrada
-        // (sem a descoberta nas 4 custódias); nenhum bloco gravado
-        assertThat(chamadasAoGateway("100000002") - chamadasAntes).isEqualTo(4);
-        assertThat(valkey.sync().exists(chave("op:100000002:saldo"))).isZero();
     }
 
     @ParameterizedTest(name = "{0}")
@@ -400,17 +385,5 @@ class CacheIT {
             return 0;
         }
         return JSON.readTree(resultado.getResponseBody()).get("measurements").get(0).get("value").asDouble();
-    }
-
-    /** Requisições recebidas pelo gateway simulado para a operação (journal do WireMock). */
-    private int chamadasAoGateway(String idOperacao) {
-        var resposta = RestClient.create(FontePrimariaContainers.urlWireMock(wireMock))
-                .post().uri("/__admin/requests/count")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(Map.of("method", "GET", "urlPathPattern",
-                        "/mainframe/custodias/[A-Z0-9]+/operacoes/" + idOperacao + "/blocos/.*"))
-                .retrieve()
-                .body(Map.class);
-        return ((Number) resposta.get("count")).intValue();
     }
 }

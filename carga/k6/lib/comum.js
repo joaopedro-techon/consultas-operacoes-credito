@@ -35,7 +35,7 @@ export const respostas429 = new Counter('respostas_429');
 export const taxa429 = new Rate('taxa_429');
 export const respostasParciais = new Rate('respostas_parciais');
 export const respostas5xx = new Counter('respostas_5xx');
-// Latência só das respostas 200: o 429 imediato da fonte primária não pode puxar o p99 para baixo
+// Latência só das respostas 200: recusas imediatas (429, 503) não podem puxar o p99 para baixo
 export const duracao200 = new Trend('duracao_200', true);
 
 const sortear = (lista) => lista[Math.floor(Math.random() * lista.length)];
