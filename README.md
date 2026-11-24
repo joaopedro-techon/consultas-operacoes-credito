@@ -107,11 +107,33 @@ qualquer chamada ao gateway).
 - 404 de um bloco: bloco indisponível (`null` + `x-blocos-indisponiveis`); sem o bloco `operacao`, a operação
   não existe (`OPERACAO`: 404 da API; `CLIENTE`/`CONTA`: a operação listada fica fora de `data`).
 - Qualquer chamada que falhar derruba a requisição inteira, sem resposta parcial, e interrompe as chamadas
-  em andamento: prazo de conexão, de pool ou de resposta esgotado → **504** (Problem Details sugerindo
-  `limite_operacoes`, menos blocos no `expand` ou a consulta por `OPERACAO`); 5xx, outro 4xx ou trancode fora
-  do layout → **502**.
+  em andamento: prazo de conexão, de pool, de resposta ou da requisição esgotado → **504** (Problem Details
+  sugerindo `limite_operacoes`, menos blocos no `expand` ou a consulta por `OPERACAO`); 5xx (depois do
+  retry), outro 4xx ou trancode fora do layout → **502**; circuit breaker aberto, bulkhead cheio ou rate
+  limiter sem permissão → **503** com `Retry-After`, sem chamar o gateway.
 - `x-correlationid` é repassado em toda chamada ao gateway; o `traceparent` (W3C) é propagado pela
   observação do `RestClient`.
+
+### Resiliência da fonte primária
+
+Proteção própria (instâncias `fontePrimaria` do Resilience4j, isoladas da visão consolidada), aplicada a cada
+chamada ao gateway, de fora para dentro: retry → circuit breaker → rate limiter → bulkhead. Números em
+`resilience4j.*.instances.fontePrimaria` no `application.yml`; a classificação das falhas fica em
+`FalhasDoGateway`.
+
+| Mecanismo | Comportamento | Resposta |
+| --- | --- | --- |
+| Prazo da requisição | `consultas.prazo.*` por tipo de consulta (OPERACAO 150 ms, CLIENTE/CONTA 400 ms), contado desde a entrada da requisição. Limita a espera por vaga no fan-out, por conexão do pool e pela resposta de cada tentativa, e o fan-out como um todo (ADR-0006) | 504 com as sugestões |
+| Retry | Só o do Resilience4j (o Apache HttpClient não retenta): 2 tentativas extras, backoff exponencial de 10 ms (×2) com jitter de 50%. Só para 5xx e falha/timeout ao **abrir** a conexão; nunca 4xx, timeout de resposta, timeout do pool, circuito aberto, bulkhead ou rate limiter. Só se ainda restar `consultas.fonte-primaria.retry.prazo-minimo-restante` (50 ms) do prazo | a falha da última tentativa (502/504) |
+| Circuit breaker | Janela de 50 chamadas, mínimo 20, abre com 50% de falhas (5xx e falhas de I/O, inclusive timeouts; 4xx e 404 contam como sucesso), 5 s aberto, 5 chamadas no meio-aberto. Chamadas interrompidas pelo próprio fan-out não contam | 503 + `Retry-After` (tempo aberto) |
+| Bulkhead (semáforo) | 50 chamadas simultâneas ao gateway (= pool), espera de até 10 ms por vaga | 503 + `Retry-After: 1` |
+| Rate limiter | 2000 chamadas ao gateway por segundo, sem fila | 503 + `Retry-After` (período do limite) |
+
+Cada tentativa tem span e timer `consultas.dependencia` próprios. O Resilience4j publica as métricas
+`resilience4j.circuitbreaker.*`, `resilience4j.retry.calls`, `resilience4j.bulkhead.*` e
+`resilience4j.ratelimiter.*` com as tags `name` (`fontePrimaria`), `kind` e `state`, sem identificadores.
+Lentidão ou falha do mainframe não afeta a visão consolidada: pool, bulkhead, circuito e rate limiter são só
+da fonte primária, e cada requisição roda na sua virtual thread.
 - Cada trancode é lido por um parser genérico dirigido por `src/main/resources/trancode/layouts/<bloco>.yml`
   (validados na subida). Mudar o template = editar o YAML:
 
@@ -278,6 +300,12 @@ CONSULTAS_DYNAMODB_CREDENCIAIS_ACCESS_KEY_ID=test CONSULTAS_DYNAMODB_CREDENCIAIS
 | `consultas.fonte-primaria.layouts` | — | `classpath:trancode/layouts/` |
 | `consultas.fonte-primaria.pool.*` | — | `max-conexoes` 50, `max-conexoes-por-rota` 50, `ttl` 5m, `keep-alive` 30s, `timeout-conexao` 200ms, `timeout-obter-conexao` 50ms, `timeout-resposta` 1s |
 | `consultas.fonte-primaria.fan-out.max-chamadas-simultaneas` | `CONSULTAS_FONTE_PRIMARIA_MAX_CHAMADAS_SIMULTANEAS` | `16` (teto de chamadas ao gateway em andamento por requisição; mínimo 1) |
+| `consultas.fonte-primaria.retry.prazo-minimo-restante` | — | `50ms` (só retenta se restar isto do prazo da requisição) |
+| `consultas.prazo.operacao` / `.cliente` / `.conta` | `CONSULTAS_PRAZO_OPERACAO` / `_CLIENTE` / `_CONTA` | `150ms` / `400ms` / `400ms` (prazo da requisição → 504) |
+| `resilience4j.circuitbreaker.instances.fontePrimaria.*` | — | janela `COUNT_BASED` de 50, mínimo 20 chamadas, 50% de falhas, 5s aberto, 5 chamadas no meio-aberto |
+| `resilience4j.bulkhead.instances.fontePrimaria.*` | — | `max-concurrent-calls` 50, `max-wait-duration` 10ms |
+| `resilience4j.ratelimiter.instances.fontePrimaria.*` | — | `limit-for-period` 2000 por `1s`, `timeout-duration` 0s |
+| `resilience4j.retry.instances.fontePrimaria.*` | — | `max-attempts` 3, `wait-duration` 10ms, backoff exponencial ×2, jitter 0.5 |
 | Endpoint OTLP (traces e métricas) | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` (só métricas; traces só com a variável) |
 | `management.opentelemetry.resource-attributes.deployment.environment.name` | `CONSULTAS_AMBIENTE` | `local` |
 
@@ -294,6 +322,12 @@ Requer JDK 25 e Docker. `verify` roda:
   usando a mesma imagem, o mesmo script de init e a mesma massa do docker-compose, e o WireMock com os
   mesmos stubs de trancode (`FontePrimariaIT` e `FontePrimariaClienteContaIT` comparam as duas rotas para
   cada operação, cliente e conta da massa; `FontePrimariaFanOutIT` registra massas próprias no WireMock para
-  teto de concorrência, falhas parciais e correlationId nas chamadas filhas).
+  teto de concorrência, falhas parciais e correlationId nas chamadas filhas; `ResilienciaFontePrimariaIT` e
+  `RateLimiterFontePrimariaIT` usam atrasos, falhas e cenários do WireMock para retry, prazo (504), circuit
+  breaker abrindo e voltando, bulkhead e rate limiter (503); `IsolamentoFontePrimariaIT` mostra a visão
+  consolidada saudável com o mainframe degradado).
+- Nos testes, os prazos por tipo de consulta são de 10 s e o circuito da fonte primária só abre com 1000
+  chamadas (`src/test/resources/application.properties`), para que containers frios e falhas provocadas de
+  propósito não afetem outros testes; os testes de resiliência usam contexto próprio com valores pequenos.
 
 O CI (`.github/workflows/ci.yml`) executa `./mvnw -B verify` e constrói a imagem Docker.

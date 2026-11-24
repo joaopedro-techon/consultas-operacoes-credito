@@ -63,6 +63,10 @@ _Avoid_: projeção, filtro de campos
 **Tipo de consulta**:
 Critério de busca: OPERACAO (por `id_operacao`), CLIENTE (por CPF/CNPJ) ou CONTA (por conta).
 
+**Prazo da requisição**:
+Tempo máximo que uma consulta pode levar, por tipo de consulta, contado desde a chegada da requisição; esgotado, a consulta falha com 504 (ADR-0006).
+_Avoid_: timeout (reservado aos limites de conexão, pool e resposta de uma chamada)
+
 **Visão consolidada**:
 Cópia de leitura das operações, otimizada para rapidez e eventualmente consistente com a fonte primária.
 
