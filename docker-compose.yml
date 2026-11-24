@@ -49,6 +49,22 @@ services:
       timeout: 3s
       retries: 30
 
+  redisinsight:
+    # UI para inspecionar o cache (só desenvolvimento local): http://localhost:5540. A conexão com o Valkey vem
+    # pré-configurada (aparece depois de aceitar os termos no primeiro acesso), com descompressão GZIP: os
+    # valores são o texto_detalhe em GZIP e aparecem como JSON.
+    image: redis/redisinsight:3.8.0
+    ports:
+      - "5540:5540"
+    environment:
+      RI_REDIS_HOST: valkey
+      RI_REDIS_PORT: "6379"
+      RI_REDIS_ALIAS: valkey (cache local)
+      RI_REDIS_COMPRESSOR: GZIP
+    depends_on:
+      valkey:
+        condition: service_healthy
+
   app:
     build: .
     ports:

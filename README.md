@@ -378,6 +378,10 @@ Para ver a tabela no **NoSQL Workbench**: *Operation builder* → *Add connectio
 `localhost`, porta `4566`. O Workbench assina com a região `localhost`; o LocalStack do compose roda com
 `DYNAMODB_SHARE_DB=1` (um só DynamoDB para qualquer região), por isso a tabela criada em `sa-east-1` aparece.
 
+Para ver o **cache no Valkey**: **RedisInsight** `redis/redisinsight:3.8.0` em http://localhost:5540. No primeiro
+acesso, aceite os termos; a conexão *valkey (cache local)* aparece pré-configurada, com descompressão GZIP, então
+cada chave `op:{id_operacao}:{bloco}` mostra o JSON do bloco (escolha o formatador *JSON*) e o TTL restante.
+
 A massa é gerada por `localstack/gerar_massa.py` a partir de uma especificação curta por operação, para que
 os blocos fechem entre si (regras no cabeçalho do script: amortizações aplicadas juros antes do principal,
 saldo = principal + juros - amortizado, IOF dos componentes = soma dos controles de IOF etc.). Para incluir
