@@ -22,6 +22,9 @@ class MascaramentoDadosPessoaisTest {
             {"cpf_cnpj":"11111111111","conta":"98765"} | {"cpf_cnpj":"111******11","conta":"*8765"}
             GET /v1?conta=123456789&expand=saldo       | GET /v1?conta=*****6789&expand=saldo
             filtro operacao.cpf_cnpj=in=52998224725    | filtro operacao.cpf_cnpj=in=529******25
+            http://gw/mainframe/contas/434115000065874/operacoes | http://gw/mainframe/contas/***********5874/operacoes
+            http://gw/mainframe/clientes/39053344705/operacoes   | http://gw/mainframe/clientes/390******05/operacoes
+            /mainframe/clientes/12ABC34501DE35/operacoes         | /mainframe/clientes/12A*********35/operacoes
             """)
     void mascaraDocumentosEContasNoTexto(String texto, String esperado) {
         assertThat(MascaramentoDadosPessoais.mascarar(texto)).isEqualTo(esperado);
