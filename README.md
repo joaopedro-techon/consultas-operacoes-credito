@@ -3,11 +3,12 @@
 API REST, somente leitura, de consulta de operações de crédito da Custódia de Ativos PF.
 Descrição completa em `docs/prompt_detalhes_2.md`; vocabulário em `GLOSSARY.md`; decisões em `docs/adr/`.
 
-**Versão 1.1.0** — consulta `OPERACAO` na visão consolidada (DynamoDB) com qualquer combinação dos
-9 blocos via `expand`, catálogo de campos por bloco e massa local completa e coerente.
+**Versão 1.2.0** — consultas `OPERACAO`, `CLIENTE` e `CONTA` na visão consolidada (DynamoDB, com cache) e na
+fonte primária, com `expand`, `fields` e `filter`, e um evento de consumo por requisição publicado no SQS.
 
 | Versão | Mudança |
 | --- | --- |
+| 1.2.0 | Evento de consumo no SQS (best-effort, em lote, HMAC de CPF/CNPJ e conta); contrato em `docs/eventos/evento-consumo.md` |
 | 1.1.0 | `expand` com os 9 blocos (inclui `controles_iof`), `x-blocos-indisponiveis`, catálogo de campos, massa nova |
 | 1.0.0 | Esqueleto do projeto e consulta `OPERACAO` com os blocos `operacao` e `originacao` |
 
@@ -19,10 +20,11 @@ Organização hexagonal em `br.com.consultas.operacoescredito`:
 | Pacote | Conteúdo |
 | --- | --- |
 | `domain` | `Bloco`, `TipoConsulta`, `CriterioConsulta`, `OperacaoConsultada`, o catálogo de campos em `domain.catalogo` e a seleção de campos em `domain.selecao` (sem framework) |
-| `application` | Caso de uso `ConsultarOperacoesUseCase` e porta de saída `FonteDeOperacoes` (sem framework) |
-| `adapters.in.web` | Controller, validação dos parâmetros, Problem Details |
+| `application` | Casos de uso `ConsultarOperacoesUseCase` e `RegistrarConsumoUseCase`, portas de saída `FonteDeOperacoes` e `PublicadorDeEventosDeConsumo` (sem framework) |
+| `adapters.in.web` | Controller, validação dos parâmetros, Problem Details, contexto da requisição e evento de consumo |
 | `adapters.out.dynamodb` | Visão consolidada (ADR-0001) |
 | `adapters.out.cache` | Cache por bloco da visão consolidada no Valkey (ADR-0002) |
+| `adapters.out.eventos` | Publicação do evento de consumo no SQS (ADR-0004) |
 | `config` | Ligação dos casos de uso às portas; leitura do catálogo de campos |
 
 As regras de dependência são verificadas pelo ArchUnit (`ArquiteturaTest`).
@@ -178,6 +180,34 @@ registro:
 
 Campo todo em branco vira `null`.
 
+## Evento de consumo (SQS)
+
+Cada requisição às rotas de consulta, com sucesso ou erro, gera um evento de consumo publicado na fila SQS
+`consultas-eventos-consumo` (ADR-0004, ADR-0007), para outro serviço levar a Firehose → S3 → Athena. Contrato
+(campos, códigos de erro, evolução por `versao_evento`) em [`docs/eventos/evento-consumo.md`](docs/eventos/evento-consumo.md).
+
+- JSON plano em `snake_case`: `versao_evento`, `timestamp`, `correlation_id`, `trace_id`, `consumidor`, `rota`,
+  `tipo_consulta`, `id_operacao`, `cpf_cnpj_hmac`, `conta_hmac`, `blocos_solicitados`, `campos_solicitados`,
+  `filtro`, `limite_operacoes`, `quantidade_operacoes_retornadas`, `blocos_indisponiveis`, `cache_hits` e
+  `cache_misses` por bloco, `status_http`, `codigo_erro`, `duracao_ms`.
+- CPF/CNPJ e conta só como HMAC-SHA256 (hex) com `consultas.eventos.segredo-hmac`, também dentro do `filtro`;
+  nunca em claro. Blocos e campos malformados ficam fora do evento.
+- Montado no fim do `ContextoRequisicaoFilter` (`RegistroDeConsumoHttp`). Os hits e misses de cache da requisição
+  são contados no `CacheDaRequisicao`, aberto pela borda HTTP e propagado às threads filhas como o MDC.
+- **Best-effort e assíncrono**: a requisição só põe o evento numa fila em memória limitada
+  (`consultas.eventos.fila.capacidade`, 10.000); uma virtual thread monta lotes de até 10 (ou o que houver 1 s depois
+  do primeiro evento) e envia cada lote num `SendMessageBatch`, em outra virtual thread. A requisição nunca espera
+  o SQS nem falha por ele.
+- Fila cheia, bulkhead sem vaga, circuito aberto, falha do SQS ou encerramento → evento descartado e contado em
+  `eventos.consumo.descartados` (tag `motivo`).
+- Resiliência própria: circuit breaker `sqs` (janela de 20, mínimo 5, 50% de falhas, 10 s aberto), bulkhead `sqs`
+  (4 envios simultâneos, espera de até 1 s por vaga), timeout por tentativa (1 s) e da chamada (3 s) e retry só do
+  SDK (`standard`).
+- Encerramento gracioso: depois que o servidor web para de atender, o que restou na fila é enviado por até
+  `consultas.eventos.fila.tempo-maximo-drenagem` (10 s).
+- `consultas.eventos.habilitado=false` desliga o evento (nada é montado nem enviado). Ligado, `segredo-hmac` e
+  `sqs.url-fila` são obrigatórios (a aplicação não sobe sem eles).
+
 ## Catálogo de campos
 
 `src/main/resources/catalogo-campos.yml` (importado pelo `application.yml`) declara, para cada bloco, a
@@ -222,9 +252,12 @@ trocar para Datadog é trocar o exporter em `observabilidade/otel-collector.yaml
 | --- | --- |
 | `http.server.requests` (timer) | `consumidor`, `tipo_consulta` (`nenhum`/`invalido` quando ausente/inválido), `rota`, `status`, `uri` (template), `method`, `outcome`, `exception` |
 | `consultas.blocos` (contador, um incremento por bloco pedido) | `bloco`, `consumidor`, `tipo_consulta`, `rota`, `status` |
-| `consultas.dependencia` (timer, um por chamada externa) | `dependencia` (`dynamodb`, `fonte_primaria`, `valkey`), `operacao` (`BatchGetItem`, `Query`... no DynamoDB; o bloco, `lista_operacoes_cliente` ou `lista_operacoes_conta` na fonte primária; `MGET`/`SET` no Valkey), `indice` (GSI ou `nenhum`, só DynamoDB) |
+| `consultas.dependencia` (timer, um por chamada externa) | `dependencia` (`dynamodb`, `fonte_primaria`, `valkey`, `sqs`), `operacao` (`BatchGetItem`, `Query`... no DynamoDB; o bloco, `lista_operacoes_cliente` ou `lista_operacoes_conta` na fonte primária; `MGET`/`SET` no Valkey; `SendMessageBatch` no SQS), `indice` (GSI ou `nenhum`, só DynamoDB) |
 | `consultas.cache` (contador, um incremento por bloco procurado no cache) | `bloco`, `resultado` (`hit`, `miss`; Valkey fora ou circuito aberto conta `miss`) |
-| `resilience4j.circuitbreaker.*` (estado, chamadas) | `name` (`valkey`), `state`/`kind` |
+| `resilience4j.circuitbreaker.*` (estado, chamadas) | `name` (`valkey`, `fontePrimaria`, `sqs`), `state`/`kind` |
+| `eventos.consumo.enviados` (contador; Prometheus `eventos_consumo_enviados_total`) | — |
+| `eventos.consumo.descartados` (contador; Prometheus `eventos_consumo_descartados_total`) | `motivo` (`fila_cheia`, `bulkhead_cheio`, `circuito_aberto`, `falha_envio`, `encerramento`) |
+| `eventos.consumo.fila` (gauge, eventos aguardando envio) | — |
 | `consultas.etapa` (timer, um por etapa interna) | `etapa` (`consulta_gsi`, `batch`, `lista_operacoes`, `fan_out`, `filtro`); `indice` em `consulta_gsi` |
 
 - `x-consumidor` vira tag como veio (id da API key no gateway); fora de `[A-Za-z0-9._-]{1,64}` vira `invalido`.
@@ -261,7 +294,7 @@ docker compose down -v
 O `docker-compose.yml` sobe:
 
 - **LocalStack Community `4.14.0`**, a última tag que roda sem auth token (ADR-0003). Uso exclusivo em
-  desenvolvimento local: a tag não recebe patches de segurança.
+  desenvolvimento local: a tag não recebe patches de segurança. Serviços `dynamodb` e `sqs`.
 - **WireMock `3.13.2`** (porta 8089), simulando o gateway do mainframe com os stubs de `wiremock/mappings`.
 - **Valkey `9.0.8-alpine`** (porta 6379), cache por bloco, sem persistência.
 - **app**, construída pelo `Dockerfile`.
@@ -272,6 +305,10 @@ O `docker-compose.yml` sobe:
   para editar). Datasources Prometheus e Jaeger e o dashboard *Consultas de Operações de Crédito*
   (latência por tipo de consulta e rota, latência por dependência, erros, blocos mais pedidos, consumo
   por consumidor) são provisionados de `observabilidade/grafana/`.
+
+O script `localstack/init/ready.d/00-eventos-consumo.sh` cria a fila SQS `consultas-eventos-consumo` dos eventos
+de consumo; para ver os eventos: `docker compose exec localstack awslocal sqs receive-message --queue-url
+http://localhost:4566/000000000000/consultas-eventos-consumo --max-number-of-messages 10`.
 
 O script `localstack/init/ready.d/01-visao-consolidada.sh` cria a tabela `operacoes-credito`
 (PK `numero_operacao`, SK `custodia_expand`), os GSIs esparsos `gsi-cliente` e `gsi-conta`
@@ -307,8 +344,14 @@ Para rodar a aplicação fora do Docker contra o LocalStack do compose:
 docker compose up -d --wait localstack
 CONSULTAS_DYNAMODB_ENDPOINT=http://localhost:4566 AWS_REGION=sa-east-1 \
 CONSULTAS_DYNAMODB_CREDENCIAIS_ACCESS_KEY_ID=test CONSULTAS_DYNAMODB_CREDENCIAIS_SECRET_ACCESS_KEY=test \
+CONSULTAS_EVENTOS_SQS_ENDPOINT=http://localhost:4566 \
+CONSULTAS_EVENTOS_SQS_URL_FILA=http://localhost:4566/000000000000/consultas-eventos-consumo \
+CONSULTAS_EVENTOS_SQS_CREDENCIAIS_ACCESS_KEY_ID=test CONSULTAS_EVENTOS_SQS_CREDENCIAIS_SECRET_ACCESS_KEY=test \
+CONSULTAS_EVENTOS_SEGREDO_HMAC=segredo-local \
 ./mvnw spring-boot:run
 ```
+
+(Ou `CONSULTAS_EVENTOS_HABILITADO=false` no lugar das variáveis `CONSULTAS_EVENTOS_*`, sem evento de consumo.)
 
 ## Configuração
 
@@ -334,6 +377,17 @@ CONSULTAS_DYNAMODB_CREDENCIAIS_ACCESS_KEY_ID=test CONSULTAS_DYNAMODB_CREDENCIAIS
 | `resilience4j.bulkhead.instances.fontePrimaria.*` | — | `max-concurrent-calls` 50, `max-wait-duration` 10ms |
 | `resilience4j.ratelimiter.instances.fontePrimaria.*` | — | `limit-for-period` 2000 por `1s`, `timeout-duration` 0s |
 | `resilience4j.retry.instances.fontePrimaria.*` | — | `max-attempts` 3, `wait-duration` 10ms, backoff exponencial ×2, jitter 0.5 |
+| `consultas.eventos.habilitado` | `CONSULTAS_EVENTOS_HABILITADO` | `true` |
+| `consultas.eventos.segredo-hmac` | `CONSULTAS_EVENTOS_SEGREDO_HMAC` | vazio (obrigatório com o evento ligado; em produção, de um cofre de segredos) |
+| `consultas.eventos.fila.capacidade` | `CONSULTAS_EVENTOS_CAPACIDADE_FILA` | `10000` |
+| `consultas.eventos.fila.tamanho-lote` / `.intervalo-envio` / `.tempo-maximo-drenagem` | — | `10` (1 a 10) / `1s` / `10s` |
+| `consultas.eventos.sqs.url-fila` | `CONSULTAS_EVENTOS_SQS_URL_FILA` | vazio (obrigatório com o evento ligado) |
+| `consultas.eventos.sqs.endpoint` | `CONSULTAS_EVENTOS_SQS_ENDPOINT` | vazio (endpoint da AWS) |
+| `consultas.eventos.sqs.regiao` | `AWS_REGION` | `sa-east-1` |
+| `consultas.eventos.sqs.credenciais.*` | `CONSULTAS_EVENTOS_SQS_CREDENCIAIS_ACCESS_KEY_ID` / `..._SECRET_ACCESS_KEY` | vazio (cadeia padrão do SDK) |
+| `consultas.eventos.sqs.timeout-tentativa` / `.timeout-chamada` | — | `1s` / `3s` |
+| `resilience4j.circuitbreaker.instances.sqs.*` | — | janela `COUNT_BASED` de 20, mínimo 5 chamadas, 50% de falhas, 10s aberto, 2 chamadas no meio-aberto |
+| `resilience4j.bulkhead.instances.sqs.*` | — | `max-concurrent-calls` 4, `max-wait-duration` 1s |
 | Endpoint OTLP (traces e métricas) | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` (só métricas; traces só com a variável) |
 | `management.opentelemetry.resource-attributes.deployment.environment.name` | `CONSULTAS_AMBIENTE` | `local` |
 
@@ -358,6 +412,11 @@ Requer JDK 25 e Docker. `verify` roda:
   o Valkey atrás de um Toxiproxy (`CacheContainers`): altera itens no DynamoDB depois da primeira chamada para
   saber de onde veio cada bloco, lê o Valkey direto pela porta do container e derruba ou atrasa o proxy para
   verificar o fail-open e o circuit breaker.
+- O evento de consumo fica desligado nos testes (`consultas.eventos.habilitado=false`), exceto no
+  `EventoDeConsumoIT` (`EventosDeConsumoContainers`), que lê a fila do LocalStack com o SDK e confere cada evento
+  (HMAC, nenhum dado em claro, hits/misses de cache com o Valkey, erros, `trace_id`) e sobe uma segunda instância
+  da aplicação para ver a fila em memória drenada no encerramento, e no `EventoDeConsumoSqsForaIT`, em que o SQS é
+  um socket que nunca responde: a consulta segue igual e rápida e os eventos são descartados e contados.
 - Nos testes, os prazos por tipo de consulta são de 10 s e o circuito da fonte primária só abre com 1000
   chamadas (`src/test/resources/application.properties`), para que containers frios e falhas provocadas de
   propósito não afetem outros testes; os testes de resiliência usam contexto próprio com valores pequenos.
