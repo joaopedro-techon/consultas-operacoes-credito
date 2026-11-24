@@ -2,7 +2,9 @@ package br.com.consultas.operacoescredito.adapters.out.dynamodb;
 
 import io.micrometer.context.ContextExecutorService;
 import io.micrometer.context.ContextSnapshotFactory;
+import io.micrometer.observation.ObservationRegistry;
 import org.springframework.stereotype.Component;
+import br.com.consultas.operacoescredito.config.observabilidade.Observacoes;
 import br.com.consultas.operacoescredito.application.port.out.FonteDeOperacoes;
 import br.com.consultas.operacoescredito.domain.Bloco;
 import br.com.consultas.operacoescredito.domain.CriterioConsulta;
@@ -48,7 +50,11 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     private static final int MAX_LEITURAS_BATCH = 3;
     private static final long BACKOFF_BASE_MS = 10;
 
+    static final String ETAPA_CONSULTA_GSI = "consulta_gsi";
+    static final String ETAPA_BATCH = "batch";
+
     private final DynamoDbClient dynamoDb;
+    private final ObservationRegistry observationRegistry;
     private final String tabela;
     private final String indiceCliente;
     private final String indiceConta;
@@ -56,8 +62,10 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     /** Leva MDC (e demais contextos registrados) às virtual threads dos lotes. */
     private final ContextSnapshotFactory contexto = ContextSnapshotFactory.builder().build();
 
-    VisaoConsolidadaDynamoDbAdapter(DynamoDbClient dynamoDb, DynamoDbProperties properties) {
+    VisaoConsolidadaDynamoDbAdapter(DynamoDbClient dynamoDb, DynamoDbProperties properties,
+                                    ObservationRegistry observationRegistry) {
         this.dynamoDb = dynamoDb;
+        this.observationRegistry = observationRegistry;
         this.tabela = properties.tabela();
         this.indiceCliente = properties.indiceCliente();
         this.indiceConta = properties.indiceConta();
@@ -86,14 +94,19 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
 
     private List<OperacaoConsultada> buscarPorIndice(String indice, String atributo, String valor,
                                                      OptionalInt limite, Set<Bloco> blocos) {
-        var operacoes = consultarIndice(indice, atributo, valor, limite);
+        var operacoes = Observacoes.etapa(observationRegistry, ETAPA_CONSULTA_GSI)
+                .lowCardinalityKeyValue("indice", indice)
+                .observe(() -> consultarIndice(indice, atributo, valor, limite));
         if (operacoes.isEmpty()) {
             return List.of();
         }
         var demaisBlocos = EnumSet.noneOf(Bloco.class);
         demaisBlocos.addAll(blocos);
         demaisBlocos.remove(Bloco.OPERACAO);
-        var itens = lerBlocos(operacoes.stream().map(OperacaoDoIndice::idOperacao).toList(), demaisBlocos);
+        var ids = operacoes.stream().map(OperacaoDoIndice::idOperacao).toList();
+        var itens = Observacoes.etapa(observationRegistry, ETAPA_BATCH)
+                .highCardinalityKeyValue("operacoes", Integer.toString(ids.size()))
+                .observe(() -> lerBlocos(ids, demaisBlocos));
 
         var resultado = new ArrayList<OperacaoConsultada>(operacoes.size());
         for (var operacao : operacoes) {

@@ -34,7 +34,7 @@ import static org.awaitility.Awaitility.await;
         properties = "management.opentelemetry.tracing.export.schedule-delay=50ms")
 @AutoConfigureRestTestClient
 @AutoConfigureTracing
-@Import({VisaoConsolidadaContainers.class, TracesIT.ExportadorEmMemoria.class})
+@Import({VisaoConsolidadaContainers.class, FontePrimariaContainers.class, TracesIT.ExportadorEmMemoria.class})
 class TracesIT {
 
     private static final String ROTA = "/v1/operacoes-credito";
@@ -77,6 +77,66 @@ class TracesIT {
             assertThat(span.getName()).isEqualTo("dynamodb BatchGetItem");
             assertThat(span.getParentSpanId()).isEqualTo(http.getSpanId());
         });
+    }
+
+    @Test
+    void consultaPorClienteGeraEtapasDeGsiEBatchComAsChamadasAoDynamoDbDentro() {
+        var correlationId = novoCorrelationId();
+
+        client.get().uri(ROTA + "?cpf_cnpj=" + CPF + "&expand=parcelas")
+                .header("x-tipo-consulta", "CLIENTE")
+                .header("x-correlationid", correlationId)
+                .exchange()
+                .expectStatus().isOk();
+
+        var http = spanHttp(correlationId);
+        var spans = spansDoTrace(http.getTraceId());
+        var gsi = unico(spans, "etapa", "consulta_gsi");
+        var batch = unico(spans, "etapa", "batch");
+        assertThat(gsi.getParentSpanId()).isEqualTo(http.getSpanId());
+        assertThat(batch.getParentSpanId()).isEqualTo(http.getSpanId());
+        assertThat(atributo(gsi, "indice")).isEqualTo("gsi-cliente");
+        assertThat(spans).filteredOn(span -> "dynamodb Query".equals(span.getName()))
+                .isNotEmpty().allSatisfy(span -> assertThat(span.getParentSpanId()).isEqualTo(gsi.getSpanId()));
+        assertThat(spans).filteredOn(span -> "dynamodb BatchGetItem".equals(span.getName()))
+                .isNotEmpty().allSatisfy(span -> assertThat(span.getParentSpanId()).isEqualTo(batch.getSpanId()));
+    }
+
+    @Test
+    void filtroGeraEtapaPropria() {
+        var correlationId = novoCorrelationId();
+
+        client.get().uri(ROTA + "?id_operacao=100000001&expand=parcelas&filter={filter}",
+                        "parcelas.numero_parcela_amortizacao==3")
+                .header("x-tipo-consulta", "OPERACAO")
+                .header("x-correlationid", correlationId)
+                .exchange()
+                .expectStatus().isOk();
+
+        var http = spanHttp(correlationId);
+        var filtro = unico(spansDoTrace(http.getTraceId()), "etapa", "filtro");
+        assertThat(filtro.getParentSpanId()).isEqualTo(http.getSpanId());
+    }
+
+    @Test
+    void fontePrimariaGeraFanOutComUmSpanDeDependenciaPorBloco() {
+        var correlationId = novoCorrelationId();
+
+        client.get().uri(ROTA + "/fonte-primaria?id_operacao=100000001&expand=parcelas,saldo")
+                .header("x-tipo-consulta", "OPERACAO")
+                .header("x-correlationid", correlationId)
+                .exchange()
+                .expectStatus().isOk();
+
+        var http = spanHttp(correlationId);
+        assertThat(atributo(http, "rota")).isEqualTo("fonte_primaria");
+        var spans = spansDoTrace(http.getTraceId());
+        var fanOut = unico(spans, "etapa", "fan_out");
+        assertThat(fanOut.getParentSpanId()).isEqualTo(http.getSpanId());
+        var chamadas = spans.stream().filter(span -> "fonte_primaria".equals(atributo(span, "dependencia"))).toList();
+        assertThat(chamadas).allSatisfy(span -> assertThat(span.getParentSpanId()).isEqualTo(fanOut.getSpanId()));
+        assertThat(chamadas).extracting(span -> atributo(span, "operacao"))
+                .containsExactlyInAnyOrder("operacao", "originacao", "parcelas", "saldo");
     }
 
     @Test
@@ -128,6 +188,12 @@ class TracesIT {
         return exportador.getFinishedSpanItems().stream()
                 .filter(span -> span.getTraceId().equals(traceId))
                 .toList();
+    }
+
+    private static SpanData unico(List<SpanData> spans, String atributo, String valor) {
+        var encontrados = spans.stream().filter(span -> valor.equals(atributo(span, atributo))).toList();
+        assertThat(encontrados).as("span com %s=%s", atributo, valor).hasSize(1);
+        return encontrados.getFirst();
     }
 
     private static String atributo(SpanData span, String nome) {

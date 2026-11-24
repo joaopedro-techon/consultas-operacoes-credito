@@ -3,6 +3,7 @@ package br.com.consultas.operacoescredito.application.service;
 import br.com.consultas.operacoescredito.application.port.in.Consulta;
 import br.com.consultas.operacoescredito.application.port.in.ConsultarOperacoesUseCase;
 import br.com.consultas.operacoescredito.application.port.out.FonteDeOperacoes;
+import br.com.consultas.operacoescredito.application.port.out.ObservadorDeEtapas;
 import br.com.consultas.operacoescredito.domain.CriterioConsulta;
 import br.com.consultas.operacoescredito.domain.OperacaoConsultada;
 import br.com.consultas.operacoescredito.domain.OperacaoNaoEncontradaException;
@@ -19,12 +20,17 @@ import java.util.Objects;
  */
 public class ConsultarOperacoesService implements ConsultarOperacoesUseCase {
 
+    /** Nome da etapa (span e timer) da aplicação do filtro. */
+    public static final String ETAPA_FILTRO = "filtro";
+
     private final FonteDeOperacoes fonte;
     private final CatalogoDeCampos catalogo;
+    private final ObservadorDeEtapas etapas;
 
-    public ConsultarOperacoesService(FonteDeOperacoes fonte, CatalogoDeCampos catalogo) {
+    public ConsultarOperacoesService(FonteDeOperacoes fonte, CatalogoDeCampos catalogo, ObservadorDeEtapas etapas) {
         this.fonte = Objects.requireNonNull(fonte, "fonte");
         this.catalogo = Objects.requireNonNull(catalogo, "catalogo");
+        this.etapas = Objects.requireNonNull(etapas, "etapas");
     }
 
     @Override
@@ -38,6 +44,9 @@ public class ConsultarOperacoesService implements ConsultarOperacoesUseCase {
         if (operacoes.isEmpty() && consulta.criterio() instanceof CriterioConsulta.PorOperacao porOperacao) {
             throw new OperacaoNaoEncontradaException(porOperacao.idOperacao());
         }
-        return filtro.aplicar(operacoes).stream().map(selecao::aplicar).toList();
+        var filtradas = filtro == FiltroDeOperacoes.NENHUM
+                ? operacoes
+                : etapas.observar(ETAPA_FILTRO, () -> filtro.aplicar(operacoes));
+        return filtradas.stream().map(selecao::aplicar).toList();
     }
 }

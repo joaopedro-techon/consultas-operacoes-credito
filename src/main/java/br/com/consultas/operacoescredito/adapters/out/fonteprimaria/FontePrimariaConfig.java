@@ -1,6 +1,7 @@
 package br.com.consultas.operacoescredito.adapters.out.fonteprimaria;
 
 import br.com.consultas.operacoescredito.application.port.out.FonteDeOperacoes;
+import io.micrometer.observation.ObservationRegistry;
 import org.apache.hc.client5.http.config.ConnectionConfig;
 import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
@@ -61,7 +62,7 @@ class FontePrimariaConfig {
     @Bean(name = FONTE_PRIMARIA, defaultCandidate = false)
     FonteDeOperacoes fontePrimaria(FontePrimariaProperties properties, RestClient.Builder restClientBuilder,
                                    @Qualifier(HTTP_CLIENT) CloseableHttpClient httpClient,
-                                   ResourceLoader resourceLoader) {
+                                   ResourceLoader resourceLoader, ObservationRegistry observationRegistry) {
         Assert.hasText(properties.url(), "consultas.fonte-primaria.url é obrigatório");
         var restClient = restClientBuilder
                 .baseUrl(properties.url())
@@ -71,6 +72,7 @@ class FontePrimariaConfig {
         var gateway = HttpServiceProxyFactory.builderFor(RestClientAdapter.create(restClient))
                 .build()
                 .createClient(GatewayMainframeClient.class);
-        return new FontePrimariaTrancodeAdapter(gateway, LayoutsTrancode.carregar(resourceLoader, properties.layouts()));
+        return new FontePrimariaTrancodeAdapter(gateway, LayoutsTrancode.carregar(resourceLoader, properties.layouts()),
+                observationRegistry);
     }
 }
