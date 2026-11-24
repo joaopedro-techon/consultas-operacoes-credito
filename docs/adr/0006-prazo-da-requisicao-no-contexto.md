@@ -4,4 +4,4 @@ Cada tipo de consulta tem um prazo (OPERACAO 150 ms, CLIENTE/CONTA 400 ms) que p
 
 O retry do Resilience4j na fonte primária só acontece se ainda restar pelo menos `consultas.fonte-primaria.retry.prazo-minimo-restante` (50 ms). Esse valor cobre o maior backoff (até 30 ms com 10 ms, ×2 e jitter de 50%) e uma tentativa rápida. Um valor fixo é mais simples de entender e de testar do que estimar a duração da próxima tentativa, e a chamada que não sai por falta de prazo também falha com 504.
 
-Na fonte primária, a abertura da conexão TCP também é limitada ao que resta do prazo, e timeouts encurtados pelo prazo não contam no circuit breaker (ADR-0009).
+Na fonte primária, a abertura da conexão TCP também é limitada ao que resta do prazo, e timeouts encurtados pelo prazo não contam no circuit breaker (ADR-0009, hoje só no repositório do mainframe).

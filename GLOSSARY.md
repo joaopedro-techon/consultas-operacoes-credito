@@ -65,10 +65,6 @@ Etapa que encontra em qual custódia a operação está, procurando-a em todas a
 **Custódia indisponível**:
 Custódia que não pôde ser consultada (falha ou proteção aberta). Se a operação não foi achada nas demais, não se pode afirmar que ela não existe: a consulta falha com 503, e não com 404.
 
-**Página de ocorrências**:
-Parte de um bloco-lista, ou de uma lista de operações, devolvida pela fonte primária em uma chamada: no máximo 30 ocorrências. A fonte primária só informa se há mais páginas e entrega a chave de continuação para pedir a próxima.
-_Avoid_: lote (reservado ao BatchGetItem)
-
 **Catálogo de campos**:
 Configuração que declara, por bloco, os campos válidos e o tipo de cada um (número, decimal, data, data-hora, texto, booleano, objeto, lista). Valida `fields`/`filter` e tipa as comparações do filtro (ADR-0005).
 _Avoid_: schema, modelo
@@ -95,14 +91,8 @@ _Avoid_: cache de consulta, cache de resposta
 Lembrança temporária (Valkey, TTL) de em qual custódia uma operação foi encontrada, usada pelas duas rotas para pular a descoberta de custódia. Guarda só a custódia, nunca dados da operação; se a custódia lembrada não tem mais a operação, a lembrança é descartada e a descoberta é refeita (ADR-0012).
 
 **Fonte primária**:
-Sistema de origem das operações (mainframe DB2), consultado quando se precisa do dado sem defasagem.
+Sistema de origem das operações (mainframe DB2), consultado quando se precisa do dado sem defasagem. Fica aqui só como referência: quem a consulta é outro serviço, em outro repositório (`consultas-operacoes-credito-mainframe`, ADR-0017).
 _Avoid_: origem (confunde com Originação)
-
-**Cota da fonte primária**:
-Quantidade máxima de chamadas por segundo que o mainframe aceita de toda a API, somadas todas as instâncias. Esgotada, a consulta é recusada com 429, sem esperar (ADR-0015).
-
-**Trancode**:
-Texto de posições fixas devolvido pela fonte primária, em que cada faixa de posições representa um campo de um bloco. Cada custódia tem o seu layout de trancode por bloco, mas todos são lidos para o mesmo contrato.
 
 **Consumidor**:
 Sistema que chama a API, identificado pela sua chave de acesso.
