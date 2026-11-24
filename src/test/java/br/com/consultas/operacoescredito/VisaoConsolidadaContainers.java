@@ -23,8 +23,12 @@ public class VisaoConsolidadaContainers {
     @Bean
     LocalStackContainer localStack() {
         return new LocalStackContainer(DockerImageName.parse(IMAGEM_LOCALSTACK))
-                .withEnv("SERVICES", "dynamodb")
+                .withEnv("SERVICES", "dynamodb,sqs")
                 .withEnv("CONSULTAS_DYNAMODB_TABELA", "operacoes-credito")
+                // Fila dos eventos de consumo; o script roda antes do da visão consolidada
+                .withCopyFileToContainer(
+                        MountableFile.forHostPath("localstack/init/ready.d/00-eventos-consumo.sh", 0755),
+                        "/etc/localstack/init/ready.d/00-eventos-consumo.sh")
                 .withCopyFileToContainer(
                         MountableFile.forHostPath("localstack/init/ready.d/01-visao-consolidada.sh", 0755),
                         "/etc/localstack/init/ready.d/01-visao-consolidada.sh")
