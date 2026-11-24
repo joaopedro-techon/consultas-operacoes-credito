@@ -44,7 +44,8 @@ class ConsultaOperacaoIT {
                             "situacao_operacao_credito": "ATIVA",
                             "data_contratacao_operacao": "2026-05-21",
                             "data_baixa_operacao": null,
-                            "cpf_cnpj": "52998224725"
+                            "cpf_cnpj": "52998224725",
+                            "custodia": "SF"
                           },
                           "originacao": {
                             "id_operacao": 100000001,

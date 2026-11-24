@@ -1,6 +1,7 @@
 package br.com.consultas.operacoescredito.adapters.out.fonteprimaria;
 
 import br.com.consultas.operacoescredito.domain.Bloco;
+import br.com.consultas.operacoescredito.domain.Custodia;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -29,9 +30,23 @@ class LayoutsTrancodeTest {
     void layoutsDoProjetoCarregamUmPorBloco() {
         var layouts = LayoutsTrancode.carregar(new DefaultResourceLoader(), "classpath:trancode/layouts/");
 
-        for (var bloco : Bloco.values()) {
-            assertThat(layouts.de(bloco).bloco()).isEqualTo(bloco.nome());
+        for (var custodia : Custodia.values()) {
+            for (var bloco : Bloco.values()) {
+                assertThat(layouts.de(custodia, bloco).bloco()).isEqualTo(bloco.nome());
+            }
         }
+    }
+
+    @Test
+    void overrideDaCustodiaComCamposEmOutrasPosicoesDevolveAsChavesNaOrdemDoBase() {
+        var layouts = LayoutsTrancode.carregar(new DefaultResourceLoader(), "classpath:trancode/layouts/");
+        var base = layouts.de(Custodia.SF, Bloco.PARCELAS).registro().campos();
+        var nsf = layouts.de(Custodia.NSF, Bloco.PARCELAS).registro().campos();
+
+        assertThat(nsf).extracting(LayoutTrancode.Campo::campo)
+                .containsExactlyElementsOf(base.stream().map(LayoutTrancode.Campo::campo).toList());
+        assertThat(nsf).extracting(LayoutTrancode.Campo::inicio)
+                .as("as posições são as do override").isNotEqualTo(base.stream().map(LayoutTrancode.Campo::inicio).toList());
     }
 
     @Test
@@ -82,7 +97,7 @@ class LayoutsTrancodeTest {
     @Test
     void layoutDaListaDeOperacoesTemIdEDataDeContratacao() {
         var lista = LayoutsTrancode.carregar(new DefaultResourceLoader(), "classpath:trancode/layouts/")
-                .listaOperacoes();
+                .listaOperacoes(Custodia.SF);
 
         assertThat(lista.estrutura()).isEqualTo(LayoutTrancode.Estrutura.LISTA);
         assertThat(lista.registro().campos()).extracting(LayoutTrancode.Campo::campo)

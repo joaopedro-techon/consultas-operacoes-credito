@@ -1,6 +1,8 @@
 # Layout do trancode da lista de operações de um cliente ou conta (formato descrito em README.md,
-# "Fonte primária"): GET /mainframe/clientes/{cpf_cnpj}/operacoes e GET /mainframe/contas/{conta}/operacoes.
-# Prefixo de 3 dígitos com a quantidade + um registro por operação, mais recente primeiro.
+# "Fonte primária"): GET /mainframe/custodias/{custodia}/clientes/{cpf_cnpj}/operacoes e
+# GET /mainframe/custodias/{custodia}/contas/{conta}/operacoes.
+# Lista paginada: cabeçalho de página (quantidade, indicador de continuação e chave de continuação) + um
+# registro por operação daquela custódia, sem ordem garantida.
 bloco: lista_operacoes
 estrutura: lista
 registro:

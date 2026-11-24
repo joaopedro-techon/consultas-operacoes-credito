@@ -60,8 +60,10 @@ class IsolamentoFontePrimariaIT {
                 .requestFactory(new JdkClientHttpRequestFactory())
                 .build();
         assertThat(statusDaVisaoConsolidada(api)).as("aquecimento").isEqualTo(200);
-        // Mainframe degradado: lento (3 s, acima do timeout de resposta de 1 s) e, quando responde, com 500
-        stubs.add(gateway.registrarPadrao("/mainframe/operacoes/93[0-9]{7}/blocos/.*", 500, "lento", 3000));
+        // Mainframe degradado em todas as custódias: lento (3 s, acima do timeout de resposta de 700 ms) e, quando
+        // responde, com 500
+        stubs.add(gateway.registrarPadrao("/mainframe/custodias/[A-Z0-9]+/operacoes/93[0-9]{7}/blocos/.*", 500,
+                "lento", 3000));
 
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             var presas = new ArrayList<Future<Integer>>();
@@ -88,7 +90,7 @@ class IsolamentoFontePrimariaIT {
                     .anyMatch(presa -> !presa.isDone());
 
             for (var presa : presas) {
-                assertThat(resultado(presa)).as("fonte primária degradada: 504 (timeout) ou 503 (bulkhead)")
+                assertThat(resultado(presa)).as("fonte primária degradada: 503 (custódias sem resposta, bulkhead) ou 504 (prazo)")
                         .isIn(503, 504);
             }
         }

@@ -1,12 +1,19 @@
 package br.com.consultas.operacoescredito.adapters.out.fonteprimaria;
 
+import br.com.consultas.operacoescredito.config.RotaAtiva;
+
+import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeCustodia;
 import br.com.consultas.operacoescredito.application.port.out.FonteDeOperacoes;
+import br.com.consultas.operacoescredito.config.observabilidade.MetricasDeCustodia;
 import br.com.consultas.operacoescredito.config.resiliencia.PrazoDaRequisicao;
+import br.com.consultas.operacoescredito.domain.PrecedenciaDeCustodia;
+import br.com.consultas.operacoescredito.domain.catalogo.CatalogoDeCampos;
 import io.github.resilience4j.bulkhead.BulkheadRegistry;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
-import io.github.resilience4j.common.circuitbreaker.configuration.CircuitBreakerConfigCustomizer;
-import io.github.resilience4j.common.retry.configuration.RetryConfigCustomizer;
+import io.github.resilience4j.ratelimiter.RateLimiter;
+import io.github.resilience4j.ratelimiter.RateLimiterConfig;
 import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.github.resilience4j.retry.RetryRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import org.apache.hc.client5.http.HttpRoute;
@@ -29,8 +36,6 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.support.RestClientAdapter;
 import org.springframework.web.service.invoker.HttpServiceProxyFactory;
 
-import java.util.function.Predicate;
-
 /**
  * Fonte primária: {@code @HttpExchange} sobre {@code RestClient} + Apache HttpClient 5 com pool próprio, e
  * resiliência própria ({@link ResilienciaFontePrimaria}), isolada da visão consolidada.
@@ -39,6 +44,7 @@ import java.util.function.Predicate;
  * primária pede {@value #FONTE_PRIMARIA} explicitamente.
  */
 @Configuration(proxyBeanMethods = false)
+@RotaAtiva(RotaAtiva.Rota.FONTE_PRIMARIA)
 class FontePrimariaConfig {
 
     /** Nome (e qualificador) do bean da porta de saída da fonte primária. */
@@ -69,34 +75,34 @@ class FontePrimariaConfig {
     }
 
     /**
-     * Retry só para falhas retentáveis ({@link FalhasDoGateway}) e só se o prazo restante da requisição comportar
-     * outra tentativa. Tentativas e backoff ficam no {@code application.yml}.
+     * Rate limiter {@value ResilienciaFontePrimaria#NOME} já com a cota desta task: o do {@code application.yml} é
+     * substituído no registro (métricas e eventos acompanham), porque mudar o limite de um existente só vale a
+     * partir do próximo período, e o primeiro sairia com o {@code limit-for-period} do yml.
      */
-    @Bean
-    RetryConfigCustomizer retryDaFontePrimaria(FontePrimariaProperties properties) {
-        var prazoMinimo = properties.retry().prazoMinimoRestante();
-        Predicate<Throwable> retentavelNoPrazo =
-                erro -> FalhasDoGateway.retentavel(erro) && PrazoDaRequisicao.comporta(prazoMinimo);
-        return RetryConfigCustomizer.of(ResilienciaFontePrimaria.NOME, retry -> retry.retryOnException(retentavelNoPrazo));
+    static RateLimiter cotaDaTask(RateLimiterRegistry registro, int chamadasPorSegundo) {
+        var declarado = registro.rateLimiter(ResilienciaFontePrimaria.NOME);
+        var config = declarado.getRateLimiterConfig();
+        var comCota = RateLimiter.of(ResilienciaFontePrimaria.NOME, RateLimiterConfig.from(config)
+                .limitForPeriod(ResilienciaFontePrimaria.limitePorPeriodo(chamadasPorSegundo,
+                        config.getLimitRefreshPeriod()))
+                .build(), declarado.getTags());
+        registro.replace(ResilienciaFontePrimaria.NOME, comCota);
+        return comCota;
     }
 
     /**
-     * O circuito conta só falhas do mainframe; chamadas interrompidas pelo próprio fan-out, timeouts encurtados
-     * pelo prazo da requisição e recusas do rate limiter e do bulkhead não contam (ADR-0009).
+     * A classificação das falhas (o circuito conta só falhas do mainframe, ADR-0009; o retry só tenta o retentável
+     * e só se o prazo comportar) é aplicada pela {@link ResilienciaFontePrimaria} a cada instância por custódia e
+     * rota (ADR-0014); números de tentativas, janelas e bulkheads ficam no {@code application.yml}.
      */
-    @Bean
-    CircuitBreakerConfigCustomizer circuitBreakerDaFontePrimaria() {
-        return CircuitBreakerConfigCustomizer.of(ResilienciaFontePrimaria.NOME, circuito -> circuito
-                .recordException(FalhasDoGateway::falhaDaDependencia)
-                .ignoreException(FalhasDoGateway::ignoradaPeloCircuito));
-    }
-
     @Bean(name = FONTE_PRIMARIA, defaultCandidate = false)
     FonteDeOperacoes fontePrimaria(FontePrimariaProperties properties, RestClient.Builder restClientBuilder,
                                    @Qualifier(HTTP_CLIENT) CloseableHttpClient httpClient,
                                    ResourceLoader resourceLoader, ObservationRegistry observationRegistry,
                                    RetryRegistry retryRegistry, CircuitBreakerRegistry circuitBreakerRegistry,
-                                   RateLimiterRegistry rateLimiterRegistry, BulkheadRegistry bulkheadRegistry) {
+                                   RateLimiterRegistry rateLimiterRegistry, BulkheadRegistry bulkheadRegistry,
+                                   CacheDeCustodia cacheDeCustodia, PrecedenciaDeCustodia precedencia,
+                                   CatalogoDeCampos catalogo, MeterRegistry meterRegistry) {
         Assert.hasText(properties.url(), "consultas.fonte-primaria.url é obrigatório");
         var restClient = restClientBuilder
                 .baseUrl(properties.url())
@@ -106,14 +112,14 @@ class FontePrimariaConfig {
         var gateway = HttpServiceProxyFactory.builderFor(RestClientAdapter.create(restClient))
                 .build()
                 .createClient(GatewayMainframeClient.class);
-        var resiliencia = new ResilienciaFontePrimaria(
-                retryRegistry.retry(ResilienciaFontePrimaria.NOME),
-                circuitBreakerRegistry.circuitBreaker(ResilienciaFontePrimaria.NOME),
-                rateLimiterRegistry.rateLimiter(ResilienciaFontePrimaria.NOME),
-                bulkheadRegistry.bulkhead(ResilienciaFontePrimaria.NOME),
-                bulkheadRegistry.bulkhead(ResilienciaFontePrimaria.BULKHEAD_CLIENTE_CONTA));
-        return new FontePrimariaTrancodeAdapter(gateway, LayoutsTrancode.carregar(resourceLoader, properties.layouts()),
-                observationRegistry, resiliencia, properties.fanOut().maxChamadasSimultaneas());
+        var resiliencia = new ResilienciaFontePrimaria(circuitBreakerRegistry, retryRegistry,
+                cotaDaTask(rateLimiterRegistry, properties.cota().porTask()), bulkheadRegistry,
+                properties.retry().prazoMinimoRestante(), properties.cota().porTask());
+        var layouts = LayoutsTrancode.carregar(resourceLoader, properties.layouts());
+        layouts.validarContra(catalogo);
+        return new FontePrimariaTrancodeAdapter(gateway, layouts, observationRegistry, resiliencia, cacheDeCustodia,
+                precedencia, new MetricasDeCustodia(meterRegistry, FontePrimariaTrancodeAdapter.ROTA),
+                properties.fanOut().maxChamadasSimultaneas(), properties.paginacao().maxPaginas());
     }
 
     /**

@@ -28,6 +28,7 @@ class CasosDeUsoConfig {
     }
 
     @Bean
+    @RotaAtiva(RotaAtiva.Rota.VISAO_CONSOLIDADA)
     ConsultarOperacoesUseCase consultarOperacoesUseCase(FonteDeOperacoes visaoConsolidada,
                                                         CatalogoDeCampos catalogoDeCampos,
                                                         ObservadorDeEtapas observadorDeEtapas) {
@@ -36,6 +37,7 @@ class CasosDeUsoConfig {
 
     @Bean(defaultCandidate = false)
     @Qualifier(FONTE_PRIMARIA)
+    @RotaAtiva(RotaAtiva.Rota.FONTE_PRIMARIA)
     ConsultarOperacoesUseCase consultarOperacoesFontePrimariaUseCase(
             @Qualifier(FONTE_PRIMARIA) FonteDeOperacoes fontePrimaria, CatalogoDeCampos catalogoDeCampos,
             ObservadorDeEtapas observadorDeEtapas) {

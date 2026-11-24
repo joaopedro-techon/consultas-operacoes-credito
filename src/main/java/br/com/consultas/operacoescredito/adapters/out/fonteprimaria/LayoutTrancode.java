@@ -3,8 +3,16 @@ package br.com.consultas.operacoescredito.adapters.out.fonteprimaria;
 import java.util.List;
 
 /**
- * Layout do trancode de um bloco, lido de {@code trancode/layouts/<bloco>.yml}.
- * Bloco-objeto: um registro. Bloco-lista: prefixo de 3 dígitos com a quantidade + registros.
+ * Layout do trancode de um bloco (ou da lista de operações), lido de {@code trancode/layouts/<bloco>.yml} ou do
+ * override da custódia em {@code trancode/layouts/<CUSTODIA>/<bloco>.yml}.
+ * <ul>
+ *     <li>Bloco-objeto: um registro;</li>
+ *     <li>Bloco-lista (e lista de operações): uma página de ocorrências por chamada (ADR-0016), com cabeçalho de
+ *     quantidade ({@value #TAMANHO_QUANTIDADE} dígitos, no máximo {@value #MAXIMO_POR_PAGINA}), indicador de
+ *     continuação ({@code S}/{@code N}) e chave de continuação ({@value #TAMANHO_CHAVE_CONTINUACAO} posições,
+ *     em branco na última página), seguido dos registros;</li>
+ *     <li>Sub-listas dentro de um registro: prefixo de quantidade e registros, sem paginação.</li>
+ * </ul>
  *
  * @param bloco     nome canônico do bloco (o mesmo do arquivo)
  * @param estrutura objeto ou lista
@@ -13,8 +21,15 @@ import java.util.List;
 record LayoutTrancode(String bloco, Estrutura estrutura, Registro registro) {
 
     static final int TAMANHO_QUANTIDADE = 3;
+    static final int TAMANHO_CHAVE_CONTINUACAO = 20;
+    static final int MAXIMO_POR_PAGINA = 30;
 
     enum Estrutura { OBJETO, LISTA }
+
+    /** {@code true} quando cada chamada devolve uma página de ocorrências (bloco-lista ou lista de operações). */
+    boolean paginado() {
+        return estrutura == Estrutura.LISTA;
+    }
 
     /**
      * Registro: campos de posição fixa ({@code inicio} relativo ao registro, a partir de 1), seguidos
@@ -42,8 +57,15 @@ record LayoutTrancode(String bloco, Estrutura estrutura, Registro registro) {
      *
      * @param formato data/data_hora: padrão do {@code DateTimeFormatter}; decimal: casas implícitas;
      *                booleano: caracteres de verdadeiro e falso (default {@code SN}); demais: não usado
+     * @param ignorar {@code true} para um campo que a custódia manda mas não faz parte do contrato: ocupa as
+     *                posições, mas não é convertido nem devolvido
      */
-    record Campo(String campo, int inicio, int tamanho, TipoCampoTrancode tipo, String formato) {
+    record Campo(String campo, int inicio, int tamanho, TipoCampoTrancode tipo, String formato, Boolean ignorar) {
+
+        /** {@code ignorar} ausente no YAML: o campo é lido normalmente. */
+        Campo {
+            ignorar = Boolean.TRUE.equals(ignorar);
+        }
 
         /** Última posição (inclusiva) do campo no registro. */
         int fim() {

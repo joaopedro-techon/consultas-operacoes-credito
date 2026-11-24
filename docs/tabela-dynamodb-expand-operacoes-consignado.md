@@ -12,26 +12,29 @@ O conteúdo de negócio de cada item fica no atributo `texto_detalhe`, um JSON c
 
 ## Esquema de chaves
 
-A chave primária é composta: `numero_operacao` (PK) + `custodia_expand` (SK). Os dois GSIs também usam `custodia_expand` como sort key, então permitem escolher o bloco na própria condição de chave.
+A chave primária é composta: `numero_operacao` (PK) + `custodia_expand` (SK). Os dois GSIs são esparsos e usam `sk_gsi` como sort key (ADR-0001): só o item `OPERACAO` carrega `cpf_cnpj_cliente`, `conta_cliente` e `sk_gsi`, então cada GSI tem um item por operação e custódia, já ordenável por data de contratação.
 
 | Índice | Partition key | Sort key | Uso |
 | --- | --- | --- | --- |
-| Tabela base | `numero_operacao` (N) | `custodia_expand` (S) | Ler a operação inteira ou um bloco específico |
-| GSI por CPF/CNPJ | `cpf_cnpj_cliente` (S) | `custodia_expand` (S) | Listar as operações ou um bloco de todas as operações de um cliente |
-| GSI por conta | `conta_cliente` (S) | `custodia_expand` (S) | Listar as operações ou um bloco de todas as operações de uma conta |
+| Tabela base | `numero_operacao` (N) | `custodia_expand` (S) | Ler os blocos de uma operação (`BatchGetItem` por custódia × bloco) |
+| `gsi-cliente` | `cpf_cnpj_cliente` (S) | `sk_gsi` (S) | Listar as operações de um cliente, da mais recente para a mais antiga |
+| `gsi-conta` | `conta_cliente` (S) | `sk_gsi` (S) | Listar as operações de uma conta, da mais recente para a mais antiga |
 
-A SK segue o padrão `SF#EXPAND#<BLOCO>`. O prefixo comum permite usar `begins_with(custodia_expand, 'SF#EXPAND#')` para trazer todos os blocos, e igualdade para trazer um só.
+A SK segue o padrão `<CUSTODIA>#EXPAND#<BLOCO>`, com a custódia em que a operação está registrada: `SF`, `F5`, `OD` ou `NSF` (ADR-0012). Ex.: `SF#EXPAND#OPERACAO`, `F5#EXPAND#PARCELAS`, `NSF#EXPAND#SALDO`. Uma operação vive em uma custódia; se aparecer em mais de uma (duplicidade), vale a precedência NSF > SF > F5 > OD e todos os blocos vêm da vencedora. Nas consultas por cliente ou conta, a custódia de cada operação vem do `custodia_expand` do item projetado no GSI.
 
-Nomes dos GSIs, projeção (`ALL`, `KEYS_ONLY` ou `INCLUDE`) e capacidade: a confirmar.
+`sk_gsi` = `<data_contratacao_operacao>#<numero_operacao>` (ex.: `2026-05-21#100000001`). Os GSIs projetam `ALL`.
+
+Capacidade: a confirmar.
 
 ## Atributos
 
 | Atributo | Tipo | Papel | Exemplo | Descrição |
 | --- | --- | --- | --- | --- |
 | `numero_operacao` | N | PK | 1234567 | Identificador da operação de crédito |
-| `custodia_expand` | S | SK da tabela e dos dois GSIs | `SF#EXPAND#PARCELAS` | Bloco de dados que o item guarda |
-| `cpf_cnpj_cliente` | S | PK do GSI por CPF/CNPJ | 12345678912 | CPF ou CNPJ do cliente, só dígitos, como string para manter zeros à esquerda |
-| `conta_cliente` | S | PK do GSI por conta | 434115000065874 | Conta do cliente |
+| `custodia_expand` | S | SK da tabela | `F5#EXPAND#PARCELAS` | Custódia e bloco de dados que o item guarda |
+| `cpf_cnpj_cliente` | S | PK do `gsi-cliente` (só no item `OPERACAO`) | 12345678912 | CPF ou CNPJ do cliente, só dígitos, como string para manter zeros à esquerda |
+| `conta_cliente` | S | PK do `gsi-conta` (só no item `OPERACAO`) | 434115000065874 | Conta do cliente |
+| `sk_gsi` | S | SK dos dois GSIs (só no item `OPERACAO`) | `2026-05-21#100000001` | Data de contratação + número da operação |
 | `codigo_expand` | N | Controle | 1 a 8 | Código numérico do bloco, um para um com a SK |
 | `data_insercao` | S | Auditoria | 2026-11-01 00:00 | Data e hora da gravação do item |
 | `data_alteração` | S | Auditoria | 2026-11-01 00:00 | Data e hora da última alteração do item |
@@ -41,18 +44,18 @@ Os tipos de `numero_operacao` e `codigo_expand` foram inferidos dos valores de e
 
 ## Tipos de item
 
-Cada operação tem 8 itens. O tamanho é do `texto_detalhe` nos dados de exemplo.
+Cada operação tem 8 itens por custódia (a massa local tem também o bloco 9, `CONTROLES_IOF`). O tamanho é do `texto_detalhe` nos dados de exemplo. `<C>` é a custódia (`SF`, `F5`, `OD` ou `NSF`).
 
 | `codigo_expand` | `custodia_expand` (SK) | Conteúdo | Formato do JSON | JSON / GZIP (bytes) |
 | --- | --- | --- | --- | --- |
-| 1 | `SF#EXPAND#OPERACAO` | Dados cadastrais da operação | Objeto | 154 / 135 |
-| 2 | `SF#EXPAND#ORIGINACAO` | Canal e dependência contábil da contratação | Objeto | 83 / 94 |
-| 3 | `SF#EXPAND#COMPONENTES` | Componentes financeiros (liberação, IOF, seguro) | Array | 844 / 175 |
-| 4 | `SF#EXPAND#PARCELAS` | Cronograma de parcelas | Array | 1.115 / 203 |
-| 5 | `SF#EXPAND#AMORTIZACOES` | Amortizações aplicadas por parcela | Array | 1.197 / 222 |
-| 6 | `SF#EXPAND#RECEBIMENTOS` | Valores recebidos e tipo de baixa | Array | 678 / 218 |
-| 7 | `SF#EXPAND#PLANO` | Plano de amortização, taxas e encargos | Objeto aninhado | 384 / 239 |
-| 8 | `SF#EXPAND#SALDO` | Saldo devedor da operação e por parcela | Objeto aninhado | 668 / 185 |
+| 1 | `<C>#EXPAND#OPERACAO` | Dados cadastrais da operação | Objeto | 154 / 135 |
+| 2 | `<C>#EXPAND#ORIGINACAO` | Canal e dependência contábil da contratação (a F5 não tem dependência contábil) | Objeto | 83 / 94 |
+| 3 | `<C>#EXPAND#COMPONENTES` | Componentes financeiros (liberação, IOF, seguro) | Array | 844 / 175 |
+| 4 | `<C>#EXPAND#PARCELAS` | Cronograma de parcelas | Array | 1.115 / 203 |
+| 5 | `<C>#EXPAND#AMORTIZACOES` | Amortizações aplicadas por parcela | Array | 1.197 / 222 |
+| 6 | `<C>#EXPAND#RECEBIMENTOS` | Valores recebidos e tipo de baixa | Array | 678 / 218 |
+| 7 | `<C>#EXPAND#PLANO` | Plano de amortização, taxas e encargos | Objeto aninhado | 384 / 239 |
+| 8 | `<C>#EXPAND#SALDO` | Saldo devedor da operação e por parcela | Objeto aninhado | 668 / 185 |
 
 ## Estrutura dos payloads (`texto_detalhe`)
 
@@ -74,7 +77,7 @@ Todos os blocos repetem `id_operacao`. Valores monetários e taxas são decimais
 | --- | --- | --- |
 | `id_operacao` | número | 123456789 |
 | `canal_contratacao` | string | MOBILE |
-| `dependencia_contabil` | string (zeros à esquerda) | 004 |
+| `dependencia_contabil` | string (zeros à esquerda), ausente na custódia F5 | 004 |
 
 ### 3 · COMPONENTES (array)
 
@@ -148,15 +151,13 @@ Todos os blocos repetem `id_operacao`. Valores monetários e taxas são decimais
 
 | Consulta | Índice | Condição de chave | Itens retornados |
 | --- | --- | --- | --- |
-| Operação completa | Tabela base | `numero_operacao = :op` | 8 |
-| Um bloco da operação (ex.: saldo) | Tabela base (`GetItem`) | `numero_operacao = :op` e `custodia_expand = 'SF#EXPAND#SALDO'` | 1 |
-| Operações de um cliente | GSI por CPF/CNPJ | `cpf_cnpj_cliente = :cpf` e `custodia_expand = 'SF#EXPAND#OPERACAO'` | 1 por operação |
-| Um bloco de todas as operações de um cliente (ex.: saldos) | GSI por CPF/CNPJ | `cpf_cnpj_cliente = :cpf` e `custodia_expand = 'SF#EXPAND#SALDO'` | 1 por operação |
-| Todos os blocos de um cliente | GSI por CPF/CNPJ | `cpf_cnpj_cliente = :cpf` | 8 por operação |
-| Operações de uma conta | GSI por conta | `conta_cliente = :conta` e `custodia_expand = 'SF#EXPAND#OPERACAO'` | 1 por operação |
-| Um bloco de todas as operações de uma conta | GSI por conta | `conta_cliente = :conta` e `custodia_expand = :bloco` | 1 por operação |
+| Blocos de uma operação, custódia conhecida | Tabela base (`BatchGetItem`) | `numero_operacao = :op` e `custodia_expand IN ('<C>#EXPAND#OPERACAO', '<C>#EXPAND#SALDO', ...)` | 1 por bloco |
+| Blocos de uma operação, custódia desconhecida | Tabela base (`BatchGetItem`) | as mesmas chaves nas 4 custódias (até 36 chaves, um lote) | 1 por bloco existente; duplicidade resolvida pela precedência |
+| Operações de um cliente | `gsi-cliente` (`Query`, `ScanIndexForward=false`) | `cpf_cnpj_cliente = :cpf` | 1 item `OPERACAO` por operação e custódia, da mais recente para a mais antiga |
+| Operações de uma conta | `gsi-conta` (`Query`, `ScanIndexForward=false`) | `conta_cliente = :conta` | Idem |
+| Demais blocos das operações de um cliente ou conta | Tabela base (`BatchGetItem`, lotes de 100) | `numero_operacao` + `<C>#EXPAND#<BLOCO>`, com `<C>` lida do `custodia_expand` do item do GSI | 1 por operação × bloco |
 
-Com `custodia_expand` como sort key dos GSIs, o bloco é filtrado na própria condição de chave: a leitura consumida corresponde só aos itens retornados, sem `FilterExpression`. Para paginar operações de clientes com muitos contratos, use `Limit` e `ExclusiveStartKey`.
+Como os GSIs são esparsos e ordenados por `sk_gsi`, a `Query` devolve só os itens `OPERACAO`, já na ordem de contratação; `Limit` corta nas N mais recentes. Os demais blocos são lidos na tabela base. Uma operação duplicada em duas custódias aparece duas vezes no GSI (mesmo `sk_gsi`, `custodia_expand` diferente) e a API fica com a da custódia de maior precedência.
 
 ## Compressão do `texto_detalhe`
 

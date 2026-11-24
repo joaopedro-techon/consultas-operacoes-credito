@@ -1,5 +1,6 @@
 package br.com.consultas.operacoescredito.adapters.out.dynamodb;
 
+import br.com.consultas.operacoescredito.config.RotaAtiva;
 import io.github.resilience4j.bulkhead.BulkheadRegistry;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.common.circuitbreaker.configuration.CircuitBreakerConfigCustomizer;
@@ -28,6 +29,7 @@ import java.net.URI;
  * a do SDK (modo {@code standard}); o Resilience4j não faz retry no DynamoDB.
  */
 @Configuration(proxyBeanMethods = false)
+@RotaAtiva(RotaAtiva.Rota.VISAO_CONSOLIDADA)
 class DynamoDbConfig {
 
     @Bean(destroyMethod = "close")

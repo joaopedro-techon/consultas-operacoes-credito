@@ -3,66 +3,199 @@
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/contas/434115000055501/operacoes"
+        "urlPath": "/mainframe/custodias/SF/contas/434115000055501/operacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "0140000000001000001142026-10-030000000001000001132026-09-030000000001000001122026-08-030000000001000001112026-07-030000000001000001102026-06-030000000001000001092026-05-030000000001000001082026-04-030000000001000001072026-03-030000000001000001062026-02-030000000001000001052026-01-030000000001000001042025-12-030000000001000001032025-11-030000000001000001022025-10-030000000001000001012025-09-03"
+        "body": "004N                    0000000001000001012025-09-030000000001000001052026-01-030000000001000001092026-05-030000000001000001132026-09-03"
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/contas/434115000065874/operacoes"
+        "urlPath": "/mainframe/custodias/SF/contas/434115000065874/operacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "0020000000001000000012026-05-210000000001000000022025-09-15"
+        "body": "002N                    0000000001000000012026-05-210000000001000000022025-09-15"
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/contas/434115000077712/operacoes"
+        "urlPath": "/mainframe/custodias/SF/contas/434115000088823/operacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "0020000000001000000042026-08-050000000001000000052026-02-10"
+        "body": "001N                    0000000001000000062026-09-12"
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/contas/434115000088823/operacoes"
+        "urlPath": "/mainframe/custodias/F5/contas/434115000055501/operacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "0010000000001000000062026-09-12"
+        "body": "004N                    0000000001000001022025-10-030000000001000001062026-02-030000000001000001102026-06-030000000001000001142026-10-03"
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/contas/434115000099991/operacoes"
+        "urlPath": "/mainframe/custodias/F5/contas/434115000070007/operacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "0010000000001000000032026-10-28"
+        "body": "001N                    0000000001000000072024-01-15"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "urlPath": "/mainframe/custodias/F5/contas/434115000099991/operacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "001N                    0000000001000000032026-10-28"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "urlPath": "/mainframe/custodias/OD/contas/434115000055501/operacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "003N                    0000000001000001032025-11-030000000001000001072026-03-030000000001000001112026-07-03"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "urlPath": "/mainframe/custodias/OD/contas/434115000077712/operacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "001N                    0000000001000000042026-08-05"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "urlPath": "/mainframe/custodias/NSF/contas/434115000055501/operacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "003N                    0000000001000001042025-12-030000000001000001082026-04-030000000001000001122026-08-03"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "urlPath": "/mainframe/custodias/NSF/contas/434115000077712/operacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "001N                    0000000001000000052026-02-10"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "urlPath": "/mainframe/custodias/NSF/contas/434115000088823/operacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/plain; charset=utf-8"
+        },
+        "body": "001N                    0000000001000000062026-09-12"
       }
     }
   ]

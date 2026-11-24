@@ -130,7 +130,7 @@ class TracesIT {
     }
 
     @Test
-    void fontePrimariaGeraFanOutComUmSpanDeDependenciaPorBloco() {
+    void fontePrimariaGeraDescobertaDaCustodiaEFanOutComUmSpanDeDependenciaPorBloco() {
         var correlationId = novoCorrelationId();
 
         client.get().uri(ROTA + "/fonte-primaria?id_operacao=100000001&expand=parcelas,saldo")
@@ -142,12 +142,24 @@ class TracesIT {
         var http = spanHttp(correlationId);
         assertThat(atributo(http, "rota")).isEqualTo("fonte_primaria");
         var spans = spansDoTrace(http.getTraceId());
+        // Sem custódia em cache: o bloco operacao nas 4 custódias (descoberta), depois os demais só na SF
+        var descoberta = unico(spans, "etapa", "descoberta_custodia");
         var fanOut = unico(spans, "etapa", "fan_out");
+        assertThat(descoberta.getParentSpanId()).isEqualTo(http.getSpanId());
         assertThat(fanOut.getParentSpanId()).isEqualTo(http.getSpanId());
         var chamadas = spans.stream().filter(span -> "fonte_primaria".equals(atributo(span, "dependencia"))).toList();
-        assertThat(chamadas).allSatisfy(span -> assertThat(span.getParentSpanId()).isEqualTo(fanOut.getSpanId()));
-        assertThat(chamadas).extracting(span -> atributo(span, "operacao"))
-                .containsExactlyInAnyOrder("operacao", "originacao", "parcelas", "saldo");
+        var naDescoberta = chamadas.stream()
+                .filter(span -> span.getParentSpanId().equals(descoberta.getSpanId())).toList();
+        assertThat(naDescoberta).allSatisfy(span -> assertThat(atributo(span, "operacao")).isEqualTo("operacao"));
+        assertThat(naDescoberta).extracting(span -> atributo(span, "custodia"))
+                .containsExactlyInAnyOrder("SF", "F5", "OD", "NSF");
+        var noFanOut = chamadas.stream().filter(span -> !naDescoberta.contains(span)).toList();
+        assertThat(noFanOut).allSatisfy(span -> {
+            assertThat(span.getParentSpanId()).isEqualTo(fanOut.getSpanId());
+            assertThat(atributo(span, "custodia")).isEqualTo("SF");
+        });
+        assertThat(noFanOut).extracting(span -> atributo(span, "operacao"))
+                .containsExactlyInAnyOrder("originacao", "parcelas", "saldo");
     }
 
     @Test
@@ -168,12 +180,19 @@ class TracesIT {
         assertThat(fanOut.getParentSpanId()).isEqualTo(http.getSpanId());
         assertThat(atributo(fanOut, "operacoes")).isEqualTo("2");
 
-        var chamadaDaLista = unico(spans, "operacao", "lista_operacoes_cliente");
-        assertThat(chamadaDaLista.getName()).isEqualTo("fonte_primaria lista_operacoes_cliente");
-        assertThat(chamadaDaLista.getParentSpanId()).isEqualTo(lista.getSpanId());
+        // A lista em cada custódia
+        var chamadasDaLista = spans.stream()
+                .filter(span -> "lista_operacoes_cliente".equals(atributo(span, "operacao")))
+                .toList();
+        assertThat(chamadasDaLista).extracting(span -> atributo(span, "custodia"))
+                .containsExactlyInAnyOrder("SF", "F5", "OD", "NSF");
+        assertThat(chamadasDaLista).allSatisfy(span -> {
+            assertThat(span.getName()).isEqualTo("fonte_primaria lista_operacoes_cliente");
+            assertThat(span.getParentSpanId()).isEqualTo(lista.getSpanId());
+        });
         var chamadasDeBloco = spans.stream()
                 .filter(span -> "fonte_primaria".equals(atributo(span, "dependencia")))
-                .filter(span -> span != chamadaDaLista)
+                .filter(span -> !chamadasDaLista.contains(span))
                 .toList();
         assertThat(chamadasDeBloco).allSatisfy(span -> assertThat(span.getParentSpanId()).isEqualTo(fanOut.getSpanId()));
         assertThat(chamadasDeBloco).extracting(span -> atributo(span, "operacao"))
@@ -203,7 +222,7 @@ class TracesIT {
     }
 
     /**
-     * Gateway fora (5xx) ou lento (timeout de resposta) nas listas de cliente e de conta: a exceção do
+     * Gateway fora (5xx) ou lento (timeout de resposta) nas listas de cliente e de conta (custódia indisponível:\n     * 503): a exceção do
      * {@code RestClient} traz a URL do gateway com o CPF/CNPJ ou a conta na mensagem e no stack trace, que vão
      * para os eventos de exceção e o status dos spans (do adapter, do cliente HTTP e do servidor) e para o log de
      * erro. Nada disso pode sair em claro.
@@ -215,16 +234,16 @@ class TracesIT {
         var contaForaDoAr = "998877665544332";
         var contaLenta = "112233445566778";
         var stubs = List.of(
-                gateway.registrar("/mainframe/clientes/" + cpfForaDoAr + "/operacoes", 503, "fora do ar", 0),
-                gateway.registrar("/mainframe/clientes/" + cpfLento + "/operacoes", 200, "000", 2000),
-                gateway.registrar("/mainframe/contas/" + contaForaDoAr + "/operacoes", 500, "erro", 0),
-                gateway.registrar("/mainframe/contas/" + contaLenta + "/operacoes", 200, "000", 2000));
+                gateway.registrar(GatewayMainframeSimulado.custodia("SF") + "/clientes/" + cpfForaDoAr + "/operacoes", 503, "fora do ar", 0),
+                gateway.registrar(GatewayMainframeSimulado.custodia("SF") + "/clientes/" + cpfLento + "/operacoes", 200, GatewayMainframeSimulado.PAGINA_VAZIA, 2000),
+                gateway.registrar(GatewayMainframeSimulado.custodia("SF") + "/contas/" + contaForaDoAr + "/operacoes", 500, "erro", 0),
+                gateway.registrar(GatewayMainframeSimulado.custodia("SF") + "/contas/" + contaLenta + "/operacoes", 200, GatewayMainframeSimulado.PAGINA_VAZIA, 2000));
         var correlationIds = new ArrayList<String>();
         try {
-            correlationIds.add(consultarFontePrimaria("CLIENTE", "cpf_cnpj=" + cpfForaDoAr, 502));
-            correlationIds.add(consultarFontePrimaria("CLIENTE", "cpf_cnpj=" + cpfLento, 504));
-            correlationIds.add(consultarFontePrimaria("CONTA", "conta=" + contaForaDoAr, 502));
-            correlationIds.add(consultarFontePrimaria("CONTA", "conta=" + contaLenta, 504));
+            correlationIds.add(consultarFontePrimaria("CLIENTE", "cpf_cnpj=" + cpfForaDoAr, 503));
+            correlationIds.add(consultarFontePrimaria("CLIENTE", "cpf_cnpj=" + cpfLento, 503));
+            correlationIds.add(consultarFontePrimaria("CONTA", "conta=" + contaForaDoAr, 503));
+            correlationIds.add(consultarFontePrimaria("CONTA", "conta=" + contaLenta, 503));
         } finally {
             stubs.forEach(gateway::remover);
         }
@@ -245,7 +264,7 @@ class TracesIT {
         // O log de acesso sai depois do log de erro da mesma requisição (mesmo appender assíncrono)
         await().atMost(Duration.ofSeconds(5)).until(() -> correlationIds.stream()
                 .allMatch(correlationId -> saida.getOut().contains(correlationId)));
-        assertThat(saida.getOut()).contains("Falha na fonte de operações");
+        assertThat(saida.getOut()).contains("Custódias indisponíveis");
         assertThat(saida.getAll()).doesNotContain(cpfForaDoAr, cpfLento, contaForaDoAr, contaLenta);
     }
 

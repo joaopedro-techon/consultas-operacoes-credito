@@ -73,6 +73,11 @@ management:
         consultas.etapa: 5ms,10ms,25ms,50ms,80ms,100ms,200ms,400ms,1s
 
 consultas:
+  # Rotas ligadas nesta instância (ADR-0015): cada serviço ECS liga só a sua; localmente, as duas
+  rotas-ativas: ${CONSULTAS_ROTAS_ATIVAS:visao-consolidada,fonte-primaria}
+  # Custódias SF, F5, OD e NSF (ADR-0012): ordem que decide a custódia de uma operação encontrada em mais de uma
+  custodia:
+    precedencia: ${CONSULTAS_CUSTODIA_PRECEDENCIA:NSF,SF,F5,OD}
   dynamodb:
     tabela: ${CONSULTAS_DYNAMODB_TABELA:operacoes-credito}
     regiao: ${AWS_REGION:sa-east-1}
@@ -113,31 +118,49 @@ consultas:
     prazo-minimo-restante: 20ms
     # Gravações fora da requisição em andamento; acima disso a gravação é descartada
     max-gravacoes-simultaneas: 32
-  # Fonte primária: gateway do mainframe (WireMock no ambiente local); sem cache (ADR-0002)
+    # Cache de custódia (custodia:{id}, ADR-0012), nas duas rotas: só o endereço da operação, nunca os dados
+    ttl-custodia: ${CONSULTAS_CACHE_TTL_CUSTODIA:24h}
+  # Fonte primária: gateway do mainframe (WireMock no ambiente local); sem cache de dados (ADR-0002)
   fonte-primaria:
     url: ${CONSULTAS_FONTE_PRIMARIA_URL:http://localhost:8089}
+    # Layout base por bloco; override por custódia em <layouts>/<CUSTODIA>/<bloco>.yml
     layouts: classpath:trancode/layouts/
+    # Pool do gateway (um host só). Cabe o pior caso dos bulkheads por custódia somados até o de CLIENTE/CONTA:
+    # com p50 de 220 ms, 500 chamadas/s por task ocupam ~110 conexões, ~250 no p99 (docs/capacidade-ecs-fargate.md)
     pool:
-      max-conexoes: 50
-      max-conexoes-por-rota: 50
+      max-conexoes: ${CONSULTAS_FONTE_PRIMARIA_MAX_CONEXOES:240}
+      max-conexoes-por-rota: ${CONSULTAS_FONTE_PRIMARIA_MAX_CONEXOES:240}
       ttl: 5m
       keep-alive: 30s
-      # Bem abaixo do prazo da OPERACAO (150 ms): host inalcançável estoura este timeout (conta no circuito e é
-      # retentado), não o prazo. Conexão, pool e resposta são limitados ao que resta do prazo (ADR-0006/0009)
+      # Host inalcançável estoura este timeout (conta no circuito e é retentado), não o prazo. Conexão, pool e
+      # resposta são limitados ao que resta do prazo (ADR-0006/0009)
       timeout-conexao: 50ms
       timeout-obter-conexao: 50ms
-      timeout-resposta: 1s
-    # CLIENTE/CONTA: teto de chamadas simultâneas ao gateway (operação × bloco) por requisição
+      # Acima do p99 do mainframe (500 ms): uma tentativa mais lenta que isso é lentidão da rota (bloco indisponível)
+      timeout-resposta: ${CONSULTAS_FONTE_PRIMARIA_TIMEOUT_RESPOSTA:700ms}
+    # Teto de chamadas simultâneas ao gateway por requisição (descoberta, operação × bloco, páginas, listas)
     fan-out:
       max-chamadas-simultaneas: ${CONSULTAS_FONTE_PRIMARIA_MAX_CHAMADAS_SIMULTANEAS:16}
-    # Só tenta de novo se restar pelo menos isto do prazo da requisição (backoff de até 30 ms + uma tentativa)
+    # Só tenta de novo se restar pelo menos isto do prazo da requisição (backoff + uma tentativa de p99)
     retry:
-      prazo-minimo-restante: 50ms
-  # Prazo da requisição por tipo de consulta (fail fast → 504), acima dos P99 alvo de 80 ms e 200 ms (ADR-0006)
+      prazo-minimo-restante: 600ms
+    # Cota do mainframe inteiro (ADR-0015): cada task recebe chamadas-por-segundo ÷ max-tasks; excedente → 429
+    cota:
+      chamadas-por-segundo: ${CONSULTAS_FONTE_PRIMARIA_COTA_CHAMADAS_POR_SEGUNDO:1500}
+      max-tasks: ${CONSULTAS_FONTE_PRIMARIA_COTA_MAX_TASKS:3}
+    # No máximo 30 ocorrências por página; acima do teto o bloco fica indisponível, nunca truncado (ADR-0016)
+    paginacao:
+      max-paginas: ${CONSULTAS_FONTE_PRIMARIA_MAX_PAGINAS:20}
+  # Prazo da requisição por rota e tipo de consulta (fail fast → 504, ADR-0006). Visão consolidada acima dos P99
+  # alvo de 80 ms e 200 ms; fonte primária acima das rodadas sequenciais ao mainframe (p99 de 500 ms por chamada)
   prazo:
     operacao: ${CONSULTAS_PRAZO_OPERACAO:150ms}
     cliente: ${CONSULTAS_PRAZO_CLIENTE:400ms}
     conta: ${CONSULTAS_PRAZO_CONTA:400ms}
+    fonte-primaria:
+      operacao: ${CONSULTAS_PRAZO_FONTE_PRIMARIA_OPERACAO:2500ms}
+      cliente: ${CONSULTAS_PRAZO_FONTE_PRIMARIA_CLIENTE:6s}
+      conta: ${CONSULTAS_PRAZO_FONTE_PRIMARIA_CONTA:6s}
   # Evento de consumo no SQS, best-effort e assíncrono (ADR-0004); contrato em docs/eventos/evento-consumo.md
   eventos:
     habilitado: ${CONSULTAS_EVENTOS_HABILITADO:true}
@@ -185,12 +208,16 @@ resilience4j:
         failure-rate-threshold: 50
         wait-duration-in-open-state: 5s
         permitted-number-of-calls-in-half-open-state: 3
-      # Conta cada tentativa ao gateway; não contam timeouts encurtados pelo prazo da requisição, chamadas
-      # interrompidas pelo fan-out nem recusas do rate limiter/bulkhead (ADR-0009)
+      # Base dos circuitos por custódia × rota (fontePrimaria-<CUSTODIA>-<bloco|lista_cliente|lista_conta>,
+      # ADR-0014); uma instância com o nome exato aqui sobrescreve a base para aquela rota. Conta cada tentativa ao
+      # gateway; não contam timeouts encurtados pelo prazo da requisição, chamadas interrompidas nem recusas do
+      # rate limiter/bulkhead (ADR-0009)
+      # Janela por tempo (10 s): com instâncias por custódia × rota, algumas rotas recebem poucas chamadas e uma
+      # janela por contagem levaria dezenas de segundos para decidir (docs/capacidade-ecs-fargate.md)
       fontePrimaria:
-        sliding-window-type: COUNT_BASED
-        sliding-window-size: 50
-        minimum-number-of-calls: 20
+        sliding-window-type: TIME_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 10
         failure-rate-threshold: 50
         wait-duration-in-open-state: 5s
         # = consultas.fonte-primaria.fan-out.max-chamadas-simultaneas: as chamadas em andamento de um fan-out
@@ -216,14 +243,15 @@ resilience4j:
       dynamodb-cliente-conta:
         max-concurrent-calls: 40
         max-wait-duration: 0ms
+      # Base dos bulkheads por custódia (fontePrimaria-<CUSTODIA>, ADR-0014): uma custódia lenta ocupa no máximo
+      # metade do pool (240) e nunca as vagas das outras
       fontePrimaria:
-        # Igual ao pool de conexões: acima disso a chamada só esperaria conexão
-        max-concurrent-calls: 50
+        max-concurrent-calls: ${CONSULTAS_FONTE_PRIMARIA_BULKHEAD_CUSTODIA:120}
         max-wait-duration: 10ms
-      # Chamadas simultâneas das consultas CLIENTE/CONTA na fonte primária, abaixo do total (fontePrimaria): o
-      # fan-out delas (até 16 por consulta) nunca toma todas as vagas e sempre sobram 10 para OPERACAO
+      # Chamadas simultâneas das consultas CLIENTE/CONTA na fonte primária, abaixo do pool: o fan-out delas nunca
+      # toma todas as conexões e sempre sobram 80 para OPERACAO
       fontePrimaria-cliente-conta:
-        max-concurrent-calls: 40
+        max-concurrent-calls: ${CONSULTAS_FONTE_PRIMARIA_BULKHEAD_CLIENTE_CONTA:160}
         max-wait-duration: 10ms
       # Envios (SendMessageBatch) simultâneos; sem vaga em 1 s o lote é descartado. Enquanto o drenador espera,
       # a fila em memória segura os eventos novos
@@ -232,21 +260,26 @@ resilience4j:
         max-wait-duration: 1s
   ratelimiter:
     instances:
-      # Consultas por segundo na visão consolidada; sem permissão → 503 na hora
+      # Consultas por segundo na visão consolidada; sem permissão → 503 na hora. Pouco acima do que uma task de
+      # 2 vCPU sustenta (~950 req/s, docs/capacidade-ecs-fargate.md): acima disso a CPU saturaria antes
       dynamodb:
-        limit-for-period: 3000
+        limit-for-period: ${CONSULTAS_DYNAMODB_LIMITE_POR_SEGUNDO:1000}
         limit-refresh-period: 1s
         timeout-duration: 0s
+      # Cota do mainframe nesta task: limit-for-period é substituído na subida por
+      # consultas.fonte-primaria.cota (chamadas-por-segundo ÷ max-tasks, proporcional ao período: 50 a cada 100 ms
+      # para 500/s). Período curto: tasks fora de sincronia não somam o dobro da cota numa janela de 1 s. Cada
+      # tentativa e cada página consome uma permissão; sem permissão: 429 na hora, sem fila (ADR-0015)
       fontePrimaria:
-        limit-for-period: 2000
-        limit-refresh-period: 1s
-        # Sem permissão: 503 na hora, sem fila
+        limit-for-period: 50
+        limit-refresh-period: 100ms
         timeout-duration: 0s
   retry:
     instances:
       fontePrimaria:
-        # 1 tentativa + 2 extras, backoff exponencial a partir de 10 ms (×2) com jitter de 50%
-        max-attempts: 3
+        # 1 tentativa + 1 extra (cada tentativa consome a cota do mainframe), backoff de 10 ms com jitter de 50%;
+        # só tenta de novo se restar consultas.fonte-primaria.retry.prazo-minimo-restante do prazo
+        max-attempts: 2
         wait-duration: 10ms
         enable-exponential-backoff: true
         exponential-backoff-multiplier: 2

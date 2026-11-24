@@ -3,46 +3,66 @@
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000104/blocos/amortizacoes"
+        "urlPath": "/mainframe/custodias/NSF/operacoes/100000104/blocos/amortizacoes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "000"
+        "body": "000N                    "
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000104/blocos/componentes"
+        "urlPath": "/mainframe/custodias/NSF/operacoes/100000104/blocos/componentes",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "004000000000100000104001001LIBERACAO           000000000100000ATIVO     000000000100000104002002IOF                 000000000000381ATIVO     000000000100000104003003IOF_FLAT            000000000000380ATIVO     000000000100000104004004SEGURO              000000000000000ATIVO     "
+        "body": "004N                    000000000100000104001001LIBERACAO           000000000100000ATIVO     000000000100000104002002IOF                 000000000000381ATIVO     000000000100000104003003IOF_FLAT            000000000000380ATIVO     000000000100000104004004SEGURO              000000000000000ATIVO     "
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000104/blocos/controles_iof"
+        "urlPath": "/mainframe/custodias/NSF/operacoes/100000104/blocos/controles_iof",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "002000000000100000104001001001000000000000127000000000000000          000000000100000104002001001000000000000254000000000000000          "
+        "body": "002N                    000000000100000104001001001000000000000127000000000000000          000000000100000104002001001000000000000254000000000000000          "
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000104/blocos/operacao"
+        "urlPath": "/mainframe/custodias/NSF/operacoes/100000104/blocos/operacao",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
@@ -55,7 +75,12 @@
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000104/blocos/originacao"
+        "urlPath": "/mainframe/custodias/NSF/operacoes/100000104/blocos/originacao",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
@@ -68,20 +93,30 @@
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000104/blocos/parcelas"
+        "urlPath": "/mainframe/custodias/NSF/operacoes/100000104/blocos/parcelas",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "0020000000001000001040010012026-01-03000000000050000000000000001000ABERTA         0000000001000001040020012026-02-03000000000050000000000000001000ABERTA         "
+        "body": "002N                    000000000100000104001001ABERTA         0000000000010000000000000500002026-01-03000000000100000104002001ABERTA         0000000000010000000000000500002026-02-03"
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000104/blocos/plano"
+        "urlPath": "/mainframe/custodias/NSF/operacoes/100000104/blocos/plano",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
@@ -94,20 +129,30 @@
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000104/blocos/recebimentos"
+        "urlPath": "/mainframe/custodias/NSF/operacoes/100000104/blocos/recebimentos",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Type": "text/plain; charset=utf-8"
         },
-        "body": "000"
+        "body": "000N                    "
       }
     },
     {
       "request": {
         "method": "GET",
-        "url": "/mainframe/operacoes/100000104/blocos/saldo"
+        "urlPath": "/mainframe/custodias/NSF/operacoes/100000104/blocos/saldo",
+        "queryParameters": {
+          "chave_continuacao": {
+            "absent": true
+          }
+        }
       },
       "response": {
         "status": 200,

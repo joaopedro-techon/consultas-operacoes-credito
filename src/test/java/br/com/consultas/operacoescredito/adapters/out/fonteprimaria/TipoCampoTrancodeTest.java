@@ -60,6 +60,6 @@ class TipoCampoTrancodeTest {
 
     private static LayoutTrancode.Campo campo(String valor, String formato) {
         var tipo = formato.contains("HH") ? TipoCampoTrancode.DATA_HORA : TipoCampoTrancode.DATA;
-        return new LayoutTrancode.Campo("data_teste", 1, valor.length(), tipo, formato);
+        return new LayoutTrancode.Campo("data_teste", 1, valor.length(), tipo, formato, false);
     }
 }

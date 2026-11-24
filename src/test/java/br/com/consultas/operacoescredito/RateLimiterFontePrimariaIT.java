@@ -15,26 +15,30 @@ import org.testcontainers.containers.GenericContainer;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Rate limiter interno da fonte primária: esgotadas as permissões do período, a aplicação recusa com 503 e
- * {@code Retry-After} sem chamar o mainframe. Contexto próprio (4 chamadas por minuto) com um único teste, para
- * que nenhum outro consuma as permissões.
+ * Cota da fonte primária (ADR-0015): esgotadas as permissões do período, a aplicação recusa com 429 e
+ * {@code Retry-After} sem chamar o mainframe. Contexto próprio (cota de 1 chamada por segundo numa única task, em
+ * períodos de 1 min: 60 permissões) com um único teste, para que nenhum outro consuma as permissões.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "resilience4j.ratelimiter.instances.fontePrimaria.limit-for-period=4",
         "resilience4j.ratelimiter.instances.fontePrimaria.limit-refresh-period=1m",
-        "resilience4j.ratelimiter.instances.fontePrimaria.timeout-duration=0s"})
+        "resilience4j.ratelimiter.instances.fontePrimaria.timeout-duration=0s",
+        "consultas.fonte-primaria.cota.chamadas-por-segundo=1",
+        "consultas.fonte-primaria.cota.max-tasks=1"})
 @AutoConfigureRestTestClient
 @Import(FontePrimariaContainers.class)
 class RateLimiterFontePrimariaIT {
 
     private static final String ROTA = "/v1/operacoes-credito/fonte-primaria";
+    private static final int PERMISSOES = 60;
+    /** Sem expand e sem custódia em cache: operacao nas 4 custódias (descoberta) + originacao na vencedora. */
+    private static final int CHAMADAS_POR_CONSULTA = 5;
 
     private final RestTestClient client;
     private final GatewayMainframeSimulado gateway;
 
     @Autowired
     RateLimiterFontePrimariaIT(@LocalServerPort int porta, @Qualifier("wireMock") GenericContainer<?> wireMock) {
-        // Cliente sem retry automático: o do Apache HttpClient repetiria o 503 depois do Retry-After
+        // Cliente sem retry automático: o do Apache HttpClient repetiria a recusa depois do Retry-After
         this.client = RestTestClient.bindToServer(new JdkClientHttpRequestFactory())
                 .baseUrl("http://localhost:" + porta)
                 .build();
@@ -42,23 +46,22 @@ class RateLimiterFontePrimariaIT {
     }
 
     @Test
-    void semPermissoesNoPeriodoDevolve503ComRetryAfterSemChamarOMainframe() {
+    void cotaEsgotadaDevolve429ComRetryAfterSemChamarOMainframe() {
         var id = 920000200L;
         gateway.registrarOperacao(id, 0);
-        var blocos = "/mainframe/operacoes/" + id + "/blocos/.*";
 
-        // Cada consulta sem expand faz 2 chamadas (operacao + originacao): as duas primeiras usam as 4 permissões
-        consultar(id).expectStatus().isOk();
-        consultar(id).expectStatus().isOk();
+        for (int i = 0; i < PERMISSOES / CHAMADAS_POR_CONSULTA; i++) {
+            consultar(id).expectStatus().isOk();
+        }
         consultar(id)
-                .expectStatus().isEqualTo(503)
+                .expectStatus().isEqualTo(429)
                 .expectHeader().valueEquals("Retry-After", "60")
                 .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
                 .expectBody()
-                .jsonPath("$.title").isEqualTo("Fonte de dados temporariamente indisponível")
+                .jsonPath("$.title").isEqualTo("Cota da fonte de dados esgotada")
                 .jsonPath("$.correlation_id").exists();
 
-        assertThat(gateway.contar(blocos)).isEqualTo(4);
+        assertThat(gateway.contar(GatewayMainframeSimulado.blocos(id))).isEqualTo(PERMISSOES);
     }
 
     private RestTestClient.ResponseSpec consultar(long id) {

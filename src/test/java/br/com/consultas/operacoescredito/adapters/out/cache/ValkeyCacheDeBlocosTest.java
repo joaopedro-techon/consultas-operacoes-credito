@@ -168,7 +168,7 @@ class ValkeyCacheDeBlocosTest {
     private ValkeyCacheDeBlocos cache(Executor gravacoes, int maxChavesPorConsulta) {
         // Uma gravação em andamento por vez
         var properties = new CacheProperties(true, Duration.ofMinutes(5), 100, maxChavesPorConsulta,
-                Duration.ofMillis(20), 1);
+                Duration.ofMillis(20), 1, Duration.ofHours(24));
         return new ValkeyCacheDeBlocos(valkey, circuitBreaker, ObservationRegistry.NOOP, metricas, properties,
                 TIMEOUT_COMANDO, gravacoes);
     }
@@ -249,6 +249,11 @@ class ValkeyCacheDeBlocosTest {
         }
 
         @Override
+        public CompletableFuture<?> del(byte[] chave) {
+            dados.remove(new String(chave, StandardCharsets.UTF_8));
+            return CompletableFuture.completedFuture(1L);
+        }
+
         public CompletableFuture<?> set(byte[] chave, byte[] valor, long ttlMilissegundos) {
             sets.incrementAndGet();
             ttls.add(ttlMilissegundos);

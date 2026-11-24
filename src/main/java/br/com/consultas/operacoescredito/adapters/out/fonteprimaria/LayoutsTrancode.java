@@ -1,6 +1,10 @@
 package br.com.consultas.operacoescredito.adapters.out.fonteprimaria;
 
 import br.com.consultas.operacoescredito.domain.Bloco;
+import br.com.consultas.operacoescredito.domain.Custodia;
+import br.com.consultas.operacoescredito.domain.catalogo.CatalogoDeCampos;
+import br.com.consultas.operacoescredito.domain.catalogo.EstruturaBloco;
+import br.com.consultas.operacoescredito.domain.catalogo.TipoCampo;
 import org.springframework.core.io.ResourceLoader;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.MapperFeature;
@@ -14,8 +18,11 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Layouts de trancode dos 9 blocos, um arquivo {@code <bloco>.yml} por bloco no diretório configurado, e o da
- * lista de operações de um cliente ou conta ({@value #LISTA_OPERACOES}{@code .yml}).
+ * Layouts de trancode por custódia: os 9 blocos ({@code <bloco>.yml}) e a lista de operações de um cliente ou conta
+ * ({@value #LISTA_OPERACOES}{@code .yml}). Cada custódia pode ter o seu layout de um bloco em
+ * {@code <diretório>/<CUSTODIA>/<bloco>.yml} (campos a mais, a menos ou em outras posições); sem ele, vale o layout
+ * base do diretório. Todos produzem o mesmo contrato: cada campo não {@code ignorar} precisa existir no catálogo de
+ * campos do bloco ({@link #validarContra}).
  * Carregados e validados na subida: layout ausente ou inconsistente impede a aplicação de iniciar.
  */
 final class LayoutsTrancode {
@@ -29,33 +36,117 @@ final class LayoutsTrancode {
             .enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS)
             .build();
 
-    private final Map<Bloco, LayoutTrancode> layouts;
-    private final LayoutTrancode listaOperacoes;
+    private final Map<Custodia, Map<Bloco, LayoutTrancode>> layouts;
+    private final Map<Custodia, LayoutTrancode> listasOperacoes;
 
-    private LayoutsTrancode(Map<Bloco, LayoutTrancode> layouts, LayoutTrancode listaOperacoes) {
+    private LayoutsTrancode(Map<Custodia, Map<Bloco, LayoutTrancode>> layouts,
+                            Map<Custodia, LayoutTrancode> listasOperacoes) {
         this.layouts = layouts;
-        this.listaOperacoes = listaOperacoes;
+        this.listasOperacoes = listasOperacoes;
     }
 
     /** @param diretorio local dos layouts (ex.: {@code classpath:trancode/layouts/}) */
     static LayoutsTrancode carregar(ResourceLoader resourceLoader, String diretorio) {
         var base = diretorio.endsWith("/") ? diretorio : diretorio + "/";
-        var layouts = new EnumMap<Bloco, LayoutTrancode>(Bloco.class);
+        var layouts = new EnumMap<Custodia, Map<Bloco, LayoutTrancode>>(Custodia.class);
+        var listas = new EnumMap<Custodia, LayoutTrancode>(Custodia.class);
+        var basePorNome = new HashMap<String, LayoutTrancode>();
         for (var bloco : Bloco.values()) {
-            layouts.put(bloco, ler(resourceLoader, base, bloco.nome()));
+            basePorNome.put(bloco.nome(), ler(resourceLoader, base, bloco.nome()));
         }
-        var listaOperacoes = ler(resourceLoader, base, LISTA_OPERACOES);
-        validarListaOperacoes(listaOperacoes);
-        return new LayoutsTrancode(layouts, listaOperacoes);
+        basePorNome.put(LISTA_OPERACOES, ler(resourceLoader, base, LISTA_OPERACOES));
+        for (var custodia : Custodia.values()) {
+            var daCustodia = new EnumMap<Bloco, LayoutTrancode>(Bloco.class);
+            for (var bloco : Bloco.values()) {
+                daCustodia.put(bloco, daCustodia(resourceLoader, base, custodia, bloco.nome(), basePorNome));
+            }
+            var lista = daCustodia(resourceLoader, base, custodia, LISTA_OPERACOES, basePorNome);
+            validarListaOperacoes(custodia, lista);
+            layouts.put(custodia, daCustodia);
+            listas.put(custodia, lista);
+        }
+        return new LayoutsTrancode(layouts, listas);
     }
 
-    LayoutTrancode de(Bloco bloco) {
-        return layouts.get(bloco);
+    LayoutTrancode de(Custodia custodia, Bloco bloco) {
+        return layouts.get(custodia).get(bloco);
     }
 
     /** Layout da lista de operações de um cliente ou conta ({@code id_operacao} + data de contratação). */
-    LayoutTrancode listaOperacoes() {
-        return listaOperacoes;
+    LayoutTrancode listaOperacoes(Custodia custodia) {
+        return listasOperacoes.get(custodia);
+    }
+
+    /**
+     * Todo campo dos layouts que não é {@code ignorar} precisa existir no catálogo do bloco, com a mesma estrutura
+     * (objeto/lista) e as sub-listas como campos {@code lista}: o trancode de qualquer custódia vira o mesmo
+     * contrato.
+     */
+    void validarContra(CatalogoDeCampos catalogo) {
+        layouts.forEach((custodia, porBloco) -> porBloco.forEach((bloco, layout) -> {
+            var definicao = catalogo.definicao(bloco);
+            var esperada = definicao.estrutura() == EstruturaBloco.LISTA
+                    ? LayoutTrancode.Estrutura.LISTA
+                    : LayoutTrancode.Estrutura.OBJETO;
+            var nome = custodia.codigo() + "/" + bloco.nome();
+            if (layout.estrutura() != esperada) {
+                throw invalido(nome, "tem estrutura " + layout.estrutura() + ", o catálogo diz " + esperada);
+            }
+            validarCampos(nome, catalogo, bloco, "", layout.registro());
+        }));
+    }
+
+    private static void validarCampos(String nome, CatalogoDeCampos catalogo, Bloco bloco, String prefixo,
+                                      LayoutTrancode.Registro registro) {
+        for (var campo : registro.campos()) {
+            if (!campo.ignorar() && catalogo.campo(bloco, prefixo + campo.campo()).isEmpty()) {
+                throw invalido(nome, "campo " + prefixo + campo.campo() + " não está no catálogo de campos (marque "
+                        + "ignorar: true se ele não faz parte do contrato)");
+            }
+        }
+        for (var lista : registro.listas()) {
+            var noCatalogo = catalogo.campo(bloco, prefixo + lista.campo());
+            if (noCatalogo.isEmpty() || noCatalogo.get().tipo() != TipoCampo.LISTA) {
+                throw invalido(nome, "sub-lista " + prefixo + lista.campo() + " não é um campo lista no catálogo");
+            }
+            validarCampos(nome, catalogo, bloco, prefixo + lista.campo() + ".", lista.registro());
+        }
+    }
+
+    private static LayoutTrancode daCustodia(ResourceLoader resourceLoader, String base, Custodia custodia,
+                                             String nome, Map<String, LayoutTrancode> basePorNome) {
+        var override = base + custodia.codigo() + "/";
+        var padrao = basePorNome.get(nome);
+        if (!resourceLoader.getResource(override + nome + ".yml").exists()) {
+            return padrao;
+        }
+        var daCustodia = ler(resourceLoader, override, nome);
+        return new LayoutTrancode(daCustodia.bloco(), daCustodia.estrutura(),
+                naOrdemDe(daCustodia.registro(), padrao.registro()));
+    }
+
+    /**
+     * Campos do override na ordem do layout base, que é a do contrato: o parser lê cada campo de posição fixa pela
+     * posição, mas devolve as chaves na ordem da lista, e a custódia com campos em outras posições não pode mudar o
+     * JSON. Campos que o base não tem (os {@code ignorar}) ficam no fim. As sub-listas mantêm a ordem do override,
+     * porque são lidas em sequência no trancode; os campos de cada uma seguem o base.
+     */
+    private static LayoutTrancode.Registro naOrdemDe(LayoutTrancode.Registro registro, LayoutTrancode.Registro base) {
+        var ordem = new HashMap<String, Integer>();
+        for (int i = 0; i < base.campos().size(); i++) {
+            ordem.put(base.campos().get(i).campo(), i);
+        }
+        var campos = new ArrayList<>(registro.campos());
+        campos.sort(Comparator.comparingInt(campo -> ordem.getOrDefault(campo.campo(), Integer.MAX_VALUE)));
+        var listasDoBase = new HashMap<String, LayoutTrancode.Lista>();
+        base.listas().forEach(lista -> listasDoBase.put(lista.campo(), lista));
+        var listas = new ArrayList<LayoutTrancode.Lista>();
+        for (var lista : registro.listas()) {
+            var doBase = listasDoBase.get(lista.campo());
+            listas.add(doBase == null ? lista
+                    : new LayoutTrancode.Lista(lista.campo(), naOrdemDe(lista.registro(), doBase.registro())));
+        }
+        return new LayoutTrancode.Registro(campos, listas);
     }
 
     private static LayoutTrancode ler(ResourceLoader resourceLoader, String base, String nome) {
@@ -80,18 +171,21 @@ final class LayoutsTrancode {
         validarRegistro(nome, layout.bloco(), layout.registro());
     }
 
-    /** A lista precisa ser um bloco-lista com o id numérico e a data de contratação de cada operação. */
-    private static void validarListaOperacoes(LayoutTrancode layout) {
+    /** A lista precisa ser paginada, com o id numérico e a data de contratação de cada operação. */
+    private static void validarListaOperacoes(Custodia custodia, LayoutTrancode layout) {
+        var nome = custodia.codigo() + "/" + LISTA_OPERACOES;
         if (layout.estrutura() != LayoutTrancode.Estrutura.LISTA) {
-            throw invalido(LISTA_OPERACOES, "exige estrutura lista");
+            throw invalido(nome, "exige estrutura lista");
         }
         var tipos = new HashMap<String, TipoCampoTrancode>();
-        layout.registro().campos().forEach(campo -> tipos.put(campo.campo(), campo.tipo()));
+        layout.registro().campos().stream()
+                .filter(campo -> !campo.ignorar())
+                .forEach(campo -> tipos.put(campo.campo(), campo.tipo()));
         if (tipos.get(CAMPO_ID_OPERACAO) != TipoCampoTrancode.NUMERO) {
-            throw invalido(LISTA_OPERACOES, "exige o campo " + CAMPO_ID_OPERACAO + " do tipo numero");
+            throw invalido(nome, "exige o campo " + CAMPO_ID_OPERACAO + " do tipo numero");
         }
         if (tipos.get(CAMPO_DATA_CONTRATACAO) != TipoCampoTrancode.DATA) {
-            throw invalido(LISTA_OPERACOES, "exige o campo " + CAMPO_DATA_CONTRATACAO + " do tipo data");
+            throw invalido(nome, "exige o campo " + CAMPO_DATA_CONTRATACAO + " do tipo data");
         }
     }
 

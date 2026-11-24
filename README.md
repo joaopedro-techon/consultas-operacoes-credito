@@ -118,7 +118,10 @@ restantes após 3 leituras → 503 com `Retry-After: 1`; item fora do formato �
 
 ## Cache por bloco (Valkey)
 
-Só na visão consolidada; a rota da fonte primária nunca lê nem grava cache (ADR-0002).
+Os dados (blocos) só são cacheados na visão consolidada; a rota da fonte primária nunca lê nem grava blocos no
+cache (ADR-0002). As duas rotas compartilham o **cache de custódia** `custodia:{id_operacao}` (só o endereço da
+operação, TTL `consultas.cache.ttl-custodia`, 24 h, ADR-0012); na visão consolidada ele vem no mesmo `MGET` dos
+blocos.
 
 - Chave `op:{id_operacao}:{bloco}` (nome canônico do bloco); valor = `texto_detalhe` em GZIP exatamente como veio
   do DynamoDB (sem recomprimir); TTL `consultas.cache.ttl` (default 5 min).
@@ -144,73 +147,126 @@ Só na visão consolidada; a rota da fonte primária nunca lê nem grava cache (
 ## Fonte primária
 
 `GET /v1/operacoes-credito/fonte-primaria` aceita os mesmos headers e parâmetros e devolve o mesmo corpo da
-visão consolidada; muda só a porta de saída que o caso de uso recebe (Strategy). Sem cache (ADR-0002).
+visão consolidada; muda só a porta de saída que o caso de uso recebe (Strategy). Sem cache de dados (ADR-0002).
 Atende `OPERACAO`, `CLIENTE` e `CONTA`, com a mesma validação de entrada da visão consolidada (400 antes de
 qualquer chamada ao gateway).
 
 | Rota do gateway (trancode em texto) | Devolve |
 | --- | --- |
-| `GET /mainframe/operacoes/{id}/blocos/{bloco}` | Trancode do bloco |
-| `GET /mainframe/clientes/{cpf_cnpj}/operacoes` | Lista de `id_operacao` + `data_contratacao_operacao`, mais recente primeiro (layout `lista_operacoes.yml`) |
-| `GET /mainframe/contas/{conta}/operacoes` | Idem |
+| `GET /mainframe/custodias/{custodia}/operacoes/{id}/blocos/{bloco}` | Trancode do bloco naquela custódia (`bloco` em minúsculas, nome canônico); 404 se a operação ou o bloco não existe nela |
+| `GET /mainframe/custodias/{custodia}/clientes/{cpf_cnpj}/operacoes` | Lista de `id_operacao` + `data_contratacao_operacao` das operações do cliente naquela custódia, sem ordem garantida (layout `lista_operacoes.yml`); 404 se não há nenhuma |
+| `GET /mainframe/custodias/{custodia}/contas/{conta}/operacoes` | Idem, por conta |
+
+`{custodia}` é `SF`, `F5`, `OD` ou `NSF` (ADR-0012). Toda rota de lista (blocos-lista e listas de cliente/conta) é
+paginada (ADR-0016): a primeira página é pedida sem query param; as seguintes com
+`?chave_continuacao=<chave>`, usando a chave (sem os espaços de preenchimento) que veio na página anterior.
 
 - Gateway do mainframe via `@HttpExchange` (`GatewayMainframeClient`) sobre `RestClient` + Apache HttpClient 5
   com pool configurável e sem retry próprio.
-- `OPERACAO`: uma chamada por bloco pedido (mais `operacao` e `originacao`).
-- `CLIENTE`/`CONTA`: uma chamada à lista do cliente ou da conta → ordenação da mais recente para a mais antiga
-  por data de contratação (no empate, maior `id_operacao` primeiro, como o `sk_gsi` da visão consolidada) →
-  `limite_operacoes` aplicado → fan-out de uma chamada por operação selecionada × bloco. Só as N operações
-  selecionadas são detalhadas. Lista com 404 no gateway: cliente/conta sem operações (`{"data": []}`).
+- `OPERACAO`: com a custódia no cache de custódia, uma chamada por bloco pedido nela. Sem ela (descoberta,
+  ADR-0012), o bloco `operacao` é pedido nas quatro custódias em paralelo; vale a de maior precedência entre as
+  que o têm (`consultas.custodia.precedencia`, default `NSF > SF > F5 > OD`; repetida em mais de uma: WARN e
+  `consultas.custodia.duplicada`), e os demais blocos são pedidos só nela. Se a custódia do cache não tem mais a
+  operação (404), ela é esquecida e a descoberta é refeita uma vez (a operação pode migrar de custódia).
+- `CLIENTE`/`CONTA`: a lista do cliente ou da conta nas quatro custódias, todas as páginas → junção (operação
+  repetida fica com a custódia de maior precedência) → ordenação da mais recente para a mais antiga por data de
+  contratação (no empate, maior `id_operacao` primeiro, como o `sk_gsi` da visão consolidada) →
+  `limite_operacoes` aplicado → fan-out de uma chamada por operação selecionada × bloco, cada operação na sua
+  custódia. Lista com 404 no gateway: nenhuma operação naquela custódia.
+- Paginação (ADR-0016): no máximo 30 ocorrências por página, páginas lidas em sequência até a última ou até
+  `consultas.fonte-primaria.paginacao.max-paginas` (20). Página que falha ou teto atingido: o bloco fica
+  indisponível, nunca truncado (na lista de cliente/conta: 503).
 - O fan-out roda em virtual threads (`Executors.newVirtualThreadPerTaskExecutor()` envolto por
   `ContextExecutorService`, sem features preview), com MDC, trace e correlationId propagados às threads filhas
   e no máximo `consultas.fonte-primaria.fan-out.max-chamadas-simultaneas` (default 16) chamadas em andamento
-  por requisição; as demais esperam vaga.
-- 404 de um bloco: bloco indisponível (`null` + `x-blocos-indisponiveis`); sem o bloco `operacao`, a operação
-  não existe (`OPERACAO`: 404 da API; `CLIENTE`/`CONTA`: a operação listada fica fora de `data`).
-- Qualquer chamada que falhar derruba a requisição inteira, sem resposta parcial, e interrompe as chamadas
-  em andamento: prazo de conexão, de pool, de resposta ou da requisição esgotado → **504** (Problem Details
-  sugerindo `limite_operacoes`, menos blocos no `expand` ou a consulta por `OPERACAO`); 5xx (depois do
-  retry), outro 4xx ou trancode fora do layout → **502**; circuit breaker aberto, bulkhead cheio ou rate
-  limiter sem permissão → **503** com `Retry-After`, sem chamar o gateway.
+  por requisição; as demais esperam vaga (WARN se o prazo acabar esperando).
+- O bloco `operacao` ganha o campo `custodia` (`SF`, `F5`, `OD` ou `NSF`), preenchido pela aplicação nas duas
+  rotas; filtrável (`filter=custodia==NSF`) e selecionável (`fields`).
+- Resposta parcial (ADR-0013): falha de um bloco que não é `operacao` (circuito daquela custódia × bloco aberto,
+  5xx depois do retry, timeout de uma tentativa, bulkhead cheio, trancode fora do layout, página que falhou)
+  deixa só aquele bloco indisponível (`null` + `x-blocos-indisponiveis`, 200) e não afeta os outros. 404 de um
+  bloco também o deixa `null`; sem o bloco `operacao`, a operação não existe (`OPERACAO`: 404 da API;
+  `CLIENTE`/`CONTA`: a operação listada fica fora de `data`).
+- Falhas que derrubam a requisição: o bloco `operacao` falhou, ou uma custódia não respondeu na descoberta ou
+  na lista sem a qual não se pode afirmar o resultado → **503** com `Retry-After` e a propriedade
+  `custodias_indisponiveis` no Problem Details (nunca 404 falso nem lista incompleta); prazo da requisição
+  esgotado → **504** (sugerindo `limite_operacoes`, menos blocos no `expand` ou a consulta por `OPERACAO`);
+  cota do mainframe esgotada → **429** com `Retry-After`. 504 e 429 interrompem as chamadas em andamento.
 - `x-correlationid` é repassado em toda chamada ao gateway; o `traceparent` (W3C) é propagado pela
   observação do `RestClient`.
 
 ### Resiliência da fonte primária
 
-Proteção própria (instâncias `fontePrimaria` do Resilience4j, isoladas da visão consolidada), aplicada a cada
+Proteção própria do Resilience4j, isolada da visão consolidada e separada por rota (ADR-0014), aplicada a cada
 chamada ao gateway, de fora para dentro: retry → circuit breaker → rate limiter → bulkhead de CLIENTE/CONTA (só
-nessas consultas) → bulkhead total. Números em `resilience4j.*.instances.fontePrimaria*` no `application.yml`; a
-classificação das falhas fica em `FalhasDoGateway` (ADR-0009).
+nessas consultas) → bulkhead da custódia. Circuito e retry existem por custódia × bloco (ou lista):
+`fontePrimaria-<CUSTODIA>-<bloco|lista_cliente|lista_conta>`, ex.: `fontePrimaria-F5-parcelas`, criados na primeira
+chamada a partir da base `resilience4j.*.instances.fontePrimaria`; uma instância declarada com o nome exato
+sobrescreve a base daquela rota. A classificação das falhas fica em `FalhasDoGateway` (ADR-0009).
 
 | Mecanismo | Comportamento | Resposta |
 | --- | --- | --- |
-| Prazo da requisição | `consultas.prazo.*` por tipo de consulta (OPERACAO 150 ms, CLIENTE/CONTA 400 ms), contado desde a entrada da requisição. Limita a espera por vaga no fan-out, a abertura da conexão TCP (`timeout-conexao`, 50 ms), a espera por conexão do pool e pela resposta de cada tentativa, e o fan-out como um todo (ADR-0006) | 504 com as sugestões |
-| Retry | Só o do Resilience4j (o Apache HttpClient não retenta): 2 tentativas extras, backoff exponencial de 10 ms (×2) com jitter de 50%. Só para 5xx e falha/timeout ao **abrir** a conexão; nunca 4xx, timeout de resposta, timeout do pool, circuito aberto, bulkhead ou rate limiter. Só se ainda restar `consultas.fonte-primaria.retry.prazo-minimo-restante` (50 ms) do prazo | a falha da última tentativa (502/504) |
-| Circuit breaker | Janela de 50 chamadas, mínimo 20, abre com 50% de falhas (5xx e falhas de I/O, inclusive timeouts que tiveram o tempo configurado inteiro; 4xx e 404 contam como sucesso), 5 s aberto. Não contam: chamadas interrompidas pelo próprio fan-out, timeouts encurtados pelo prazo da requisição (um 504 não abre o circuito com o mainframe saudável) e recusas do rate limiter e do bulkhead. Meio-aberto com 16 chamadas (= `max-chamadas-simultaneas`); a recusa das chamadas além delas não interrompe as sondas em andamento, que terminam e decidem o circuito (ADR-0009) | 503 + `Retry-After` (tempo aberto) |
-| Bulkhead `fontePrimaria-cliente-conta` (semáforo) | Só chamadas de consultas CLIENTE/CONTA: 40 simultâneas, espera de até 10 ms. Abaixo do total: o fan-out delas não impede OPERACAO | 503 + `Retry-After: 1` |
-| Bulkhead `fontePrimaria` (semáforo) | Todas as chamadas: 50 simultâneas ao gateway (= pool), espera de até 10 ms por vaga | 503 + `Retry-After: 1` |
-| Rate limiter | 2000 chamadas ao gateway por segundo, sem fila | 503 + `Retry-After` (período do limite) |
+| Prazo da requisição | `consultas.prazo.fonte-primaria.*` (OPERACAO 2,5 s, CLIENTE/CONTA 6 s; mainframe com p50 de 220 ms e p99 de 500 ms por chamada), contado desde a entrada da requisição. Limita a espera por vaga no fan-out, a abertura da conexão TCP (`timeout-conexao`, 50 ms), a espera por conexão do pool e pela resposta de cada tentativa (`timeout-resposta`, 700 ms) e o fan-out como um todo (ADR-0006) | 504 com as sugestões |
+| Retry | Só o do Resilience4j (o Apache HttpClient não retenta): 1 tentativa extra (cada tentativa consome a cota), backoff de 10 ms com jitter de 50%. Só para 5xx, 429 do mainframe e falha/timeout ao **abrir** a conexão; nunca 4xx, timeout de resposta, timeout do pool, circuito aberto, bulkhead ou rate limiter. Só se ainda restar `consultas.fonte-primaria.retry.prazo-minimo-restante` (600 ms) do prazo | a falha da última tentativa |
+| Circuit breaker (por custódia × bloco) | Janela de 10 s, mínimo 10 chamadas, abre com 50% de falhas (5xx e falhas de I/O, inclusive timeouts que tiveram o tempo configurado inteiro; 4xx e 404 contam como sucesso), 5 s aberto. Não contam: chamadas interrompidas, timeouts encurtados pelo prazo da requisição e recusas do rate limiter e do bulkhead. Meio-aberto com 16 chamadas (= `max-chamadas-simultaneas`) | bloco indisponível; 503 se for o bloco `operacao` ou uma lista |
+| Bulkhead `fontePrimaria-cliente-conta` (semáforo) | Só chamadas de consultas CLIENTE/CONTA: 160 simultâneas, espera de até 10 ms. Abaixo do pool: sempre sobram 80 conexões para OPERACAO | idem |
+| Bulkhead `fontePrimaria-<CUSTODIA>` (semáforo) | Por custódia: 120 simultâneas (metade do pool de 240), espera de até 10 ms. Uma custódia lenta não toma as vagas das outras | idem |
+| Rate limiter `fontePrimaria` (cota) | Cota do mainframe dividida pelas tasks do serviço: `consultas.fonte-primaria.cota.chamadas-por-segundo` (1500) ÷ `max-tasks` (3) = 500/s por task, em períodos de 100 ms (50 permissões), sem fila. Cada tentativa e cada página consome uma permissão. Local, sem coordenação entre tasks; o serviço é publicado com `maximumPercent=100` para nunca passar de `max-tasks` (ADR-0015) | 429 + `Retry-After` |
 
-Cada tentativa tem span e timer `consultas.dependencia` próprios. O Resilience4j publica as métricas
+Cada tentativa tem span e timer `consultas.dependencia` próprios, com a tag `custodia`. O Resilience4j publica
 `resilience4j.circuitbreaker.*`, `resilience4j.retry.calls`, `resilience4j.bulkhead.*` e
-`resilience4j.ratelimiter.*` com as tags `name` (`fontePrimaria`), `kind` e `state`, sem identificadores.
-Lentidão ou falha do mainframe não afeta a visão consolidada: pool, bulkhead, circuito e rate limiter são só
-da fonte primária, e cada requisição roda na sua virtual thread.
-- Cada trancode é lido por um parser genérico dirigido por `src/main/resources/trancode/layouts/<bloco>.yml`
-  (validados na subida). Mudar o template = editar o YAML:
+`resilience4j.ratelimiter.*` com as tags `name` (ex.: `fontePrimaria-F5-parcelas`), `kind` e `state`, sem
+identificadores. A descoberta é medida por `consultas.custodia.descoberta{rota,custodia,resultado}`
+(`encontrada`, `nao_encontrada`, `indisponivel`, `cache`). Lentidão ou falha do mainframe não afeta a visão
+consolidada: pool, bulkheads, circuitos e rate limiter são só da fonte primária e, em produção, ficam em outro
+serviço ECS (`consultas.rotas-ativas`, ADR-0015).
+
+Logs WARN (logger `resiliencia`) de todas as instâncias, inclusive DynamoDB, Valkey e SQS: toda tentativa de
+retry (instância, tentativa N de M, espera e motivo) e o retry esgotado; toda transição de circuit breaker, com
+as taxas de falha e de lentidão e os limiares; recusas (circuito aberto, bulkhead cheio, rate limiter sem
+permissão) amostradas a uma linha por instância a cada 5 s, com quantas foram suprimidas.
+
+- Cada trancode é lido por um parser genérico dirigido por layouts YAML (validados na subida). Mudar o
+  template = editar o YAML:
+  - `src/main/resources/trancode/layouts/<bloco>.yml`: layout base, usado pela SF e por toda custódia sem
+    override;
+  - `src/main/resources/trancode/layouts/<CUSTODIA>/<bloco>.yml`: override opcional da custódia, no mesmo
+    formato (`bloco:` igual ao nome do arquivo). Campo que a custódia não tem fica fora do layout e ausente na
+    saída; campo que ela tem e o contrato não (fora do catálogo) é declarado com `ignorar: true` e pulado.
 
 ```yaml
 bloco: saldo
-estrutura: objeto            # objeto: um registro | lista: prefixo de 3 dígitos com a quantidade + registros
+estrutura: objeto            # objeto: um registro | lista: páginas de registros (abaixo)
 registro:
   campos:                    # posições fixas; inicio a partir de 1, relativo ao registro
     - { campo: id_operacao, inicio: 1, tamanho: 18, tipo: numero }
     - { campo: saldo_devedor_operacao, inicio: 19, tamanho: 15, tipo: decimal, formato: 2 }
     - { campo: data_posicao_calculo, inicio: 39, tamanho: 10, tipo: data, formato: yyyy-MM-dd }
-  listas:                    # sub-listas após a parte fixa, na ordem declarada, com o mesmo prefixo
-    - campo: saldo_parcelas
+  listas:                    # sub-listas após a parte fixa, na ordem declarada: prefixo de 3 dígitos com a
+    - campo: saldo_parcelas  # quantidade + registros, sem paginação
       registro: { campos: [ ... ] }
 ```
+
+Um layout com `estrutura: lista` (blocos-lista e `lista_operacoes`) é paginado: cada resposta é uma página com
+no máximo 30 ocorrências (ADR-0016).
+
+| Posição | Tamanho | Conteúdo |
+| --- | --- | --- |
+| 1 | 3 | Quantidade de ocorrências nesta página (`000` a `030`) |
+| 4 | 1 | Indicador de continuação: `S` há mais páginas, `N` última página |
+| 5 | 20 | Chave de continuação, alinhada à esquerda e completada com espaços; em branco quando o indicador é `N` |
+| 25 | — | As ocorrências, uma após a outra, com o tamanho do registro do layout |
+
+Lista vazia = `000N` seguido de 20 espaços. A chave é opaca para a API: nos stubs locais é o nome do bloco
+(até 14 caracteres) seguido da posição da próxima ocorrência com 6 dígitos (ex.: `PARCELAS000031`).
+
+Diferenças de layout por custódia na massa local (de propósito, para exercitar o parser):
+
+| Custódia | Layout | Diferença |
+| --- | --- | --- |
+| F5 | `F5/originacao.yml` | sem `dependencia_contabil` (registro de 38 posições); o campo fica ausente na resposta |
+| OD | `OD/operacao.yml` | `codigo_produto_od` (texto, posição 34, tamanho 6, `ignorar: true`) no meio do registro; `data_contratacao_operacao`, `data_baixa_operacao` e `cpf_cnpj` deslocados 6 posições (40, 50 e 60) |
+| NSF | `NSF/parcelas.yml` | mesmos campos, outra ordem: `situacao_parcela` (25), `valor_juros_principal_parcela` (40), `valor_principal_parcela` (55), `data_vencimento_parcela` (70) |
 
 | `tipo` | `formato` | Conversão |
 | --- | --- | --- |
@@ -371,8 +427,10 @@ http://localhost:4566/000000000000/consultas-eventos-consumo --max-number-of-mes
 O script `localstack/init/ready.d/01-visao-consolidada.sh` cria a tabela `operacoes-credito`
 (PK `numero_operacao`, SK `custodia_expand`), os GSIs esparsos `gsi-cliente` e `gsi-conta`
 (SK `sk_gsi` = `<data_contratacao_operacao>#<numero_operacao>`, projeção `ALL`) e carrega a massa de
-`localstack/massa/<numero_operacao>/` (um `<BLOCO>.json` por bloco, gravado em GZIP no `texto_detalhe`,
-e `indices.env` com os atributos dos GSIs, que vão só no item `OPERACAO`).
+`localstack/massa/<numero_operacao>/`: um diretório por custódia (`SF`, `F5`, `OD`, `NSF`) com um
+`<BLOCO>.json` por bloco, gravado em GZIP no `texto_detalhe` com a SK `<CUSTODIA>#EXPAND#<BLOCO>`, e
+`indices.env` com os atributos dos GSIs, que vão só no item `OPERACAO` de cada custódia (uma operação
+duplicada aparece duas vezes no GSI).
 
 Para ver a tabela no **NoSQL Workbench**: *Operation builder* → *Add connection* → *DynamoDB local*, host
 `localhost`, porta `4566`. O Workbench assina com a região `localhost`; o LocalStack do compose roda com
@@ -385,24 +443,27 @@ cada chave `op:{id_operacao}:{bloco}` mostra o JSON do bloco (escolha o formatad
 A massa é gerada por `localstack/gerar_massa.py` a partir de uma especificação curta por operação, para que
 os blocos fechem entre si (regras no cabeçalho do script: amortizações aplicadas juros antes do principal,
 saldo = principal + juros - amortizado, IOF dos componentes = soma dos controles de IOF etc.). Para incluir
-uma operação, acrescente uma entrada em `OPERACOES` e rode `python localstack/gerar_massa.py`. Ao final ele
-chama `localstack/gerar_trancode.py` (requer PyYAML), que codifica cada `<BLOCO>.json` com o layout de
-trancode do bloco e grava `wiremock/mappings/<id_operacao>.json`, além de `clientes.json` e `contas.json` com a
-lista de operações de cada cliente e conta da massa (de `indices.env`): as duas fontes servem a mesma massa.
+uma operação, acrescente uma entrada em `OPERACOES` (com `custodias`) e rode `python localstack/gerar_massa.py`.
+Ao final ele chama `localstack/gerar_trancode.py` (requer PyYAML), que codifica cada
+`<CUSTODIA>/<BLOCO>.json` com o layout da custódia (override, se houver, senão o base), paginado nas listas, e
+grava `wiremock/mappings/<id_operacao>.json`, além de `clientes.json` e `contas.json` com a lista de operações
+de cada cliente e conta em cada custódia (de `indices.env`): as duas fontes servem a mesma massa.
 
-| `id_operacao` | Situação | CPF/CNPJ | Conta | Cenário |
-| --- | --- | --- | --- | --- |
-| 100000001 | ATIVA | 52998224725 | 434115000065874 | 12 parcelas, 5 pagas, parcela 6 com amortização parcial e 2 dias de atraso |
-| 100000002 | LIQUIDADA | 52998224725 | 434115000065874 | antecipação liquidando 3 parcelas (`BAIXA_INTEGRAL_MAIS_UMA_PARCELA`) |
-| 100000003 | ATIVA | 52998224725 | 434115000099991 | sem recebimentos; **sem os blocos `plano` e `saldo`** |
-| 100000004 | ATIVA | 12ABC34501DE35 (CNPJ alfanumérico) | 434115000077712 | 10 parcelas, 3 pagas |
-| 100000005 | LIQUIDADA | 12ABC34501DE35 | 434115000077712 | 4 parcelas pagas no vencimento |
-| 100000006 | ATIVA | 11144477735 | 434115000088823 | 8 parcelas, 2 pagas |
-| 100000101 a 100000114 | ATIVA | 11222333000181 | 434115000055501 | 14 operações mensais (2025-09-03 a 2026-10-03), 2 parcelas, sem recebimentos |
+| `id_operacao` | Custódia | Situação | CPF/CNPJ | Conta | Cenário |
+| --- | --- | --- | --- | --- | --- |
+| 100000001 | SF | ATIVA | 52998224725 | 434115000065874 | 12 parcelas, 5 pagas, parcela 6 com amortização parcial e 2 dias de atraso |
+| 100000002 | SF | LIQUIDADA | 52998224725 | 434115000065874 | antecipação liquidando 3 parcelas (`BAIXA_INTEGRAL_MAIS_UMA_PARCELA`) |
+| 100000003 | F5 | ATIVA | 52998224725 | 434115000099991 | sem recebimentos; **sem os blocos `plano` e `saldo`**; sem `dependencia_contabil` (F5) |
+| 100000004 | OD | ATIVA | 12ABC34501DE35 (CNPJ alfanumérico) | 434115000077712 | 10 parcelas, 3 pagas; trancode do `operacao` com o campo ignorado da OD |
+| 100000005 | NSF | LIQUIDADA | 12ABC34501DE35 | 434115000077712 | 4 parcelas pagas no vencimento; trancode de `parcelas` na ordem da NSF |
+| 100000006 | SF **e** NSF | ATIVA (SF) / `ATIVA_NSF` (NSF) | 11144477735 | 434115000088823 | 8 parcelas, 2 pagas; **duplicada**: mesmos blocos nas duas custódias, só a situação muda; a NSF vence (precedência NSF > SF > F5 > OD) |
+| 100000007 | F5 | ATIVA | 39053344705 | 434115000070007 | 75 parcelas, 34 pagas no vencimento: no trancode, `parcelas` e `controles_iof` em 3 páginas (30 + 30 + 15), `amortizacoes` e `recebimentos` em 2 (30 + 4) |
+| 100000101 a 100000114 | rodízio SF, F5, OD, NSF (101 SF, 102 F5, 103 OD, 104 NSF, 105 SF...) | ATIVA | 11222333000181 | 434115000055501 | 14 operações mensais (2025-09-03 a 2026-10-03), 2 parcelas, sem recebimentos; as F5 sem `dependencia_contabil` |
 
-O cliente 52998224725 tem três operações em duas contas; a conta 434115000065874 e a 434115000077712 têm
-duas operações cada. O cliente 11222333000181 (e a conta 434115000055501) tem 14 operações: com todos os
-blocos no `expand`, o `BatchGetItem` passa de 100 chaves e é dividido em lotes.
+O cliente 52998224725 tem três operações em duas contas (SF e F5); a conta 434115000065874 e a
+434115000077712 têm duas operações cada. O cliente 11222333000181 (e a conta 434115000055501) tem 14
+operações nas quatro custódias: com todos os blocos no `expand`, o `BatchGetItem` passa de 100 chaves e é
+dividido em lotes. Uma custódia em que o cliente ou a conta não tem operação não tem stub de lista (404).
 
 Para rodar a aplicação fora do Docker contra o LocalStack do compose:
 

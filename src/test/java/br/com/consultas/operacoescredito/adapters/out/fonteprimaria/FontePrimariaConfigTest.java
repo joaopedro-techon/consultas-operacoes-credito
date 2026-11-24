@@ -5,6 +5,7 @@ import org.apache.hc.client5.http.ConnectTimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.bind.PropertySourcesPlaceholdersResolver;
 import org.springframework.boot.context.properties.source.ConfigurationPropertySources;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.StandardEnvironment;
@@ -37,7 +38,7 @@ class FontePrimariaConfigTest {
         var padrao = Binder.get(new StandardEnvironment())
                 .bindOrCreate("consultas.fonte-primaria", FontePrimariaProperties.class).pool();
         var fontes = new YamlPropertySourceLoader().load("application", new ClassPathResource("application.yml"));
-        var configurado = new Binder(ConfigurationPropertySources.from(fontes))
+        var configurado = new Binder(ConfigurationPropertySources.from(fontes), new PropertySourcesPlaceholdersResolver(fontes))
                 .bindOrCreate("consultas.fonte-primaria.pool", FontePrimariaProperties.Pool.class);
 
         for (var pool : new FontePrimariaProperties.Pool[] {padrao, configurado}) {
@@ -80,7 +81,7 @@ class FontePrimariaConfigTest {
         var comConexaoLenta = new FontePrimariaProperties(propriedades.url(), propriedades.layouts(),
                 new FontePrimariaProperties.Pool(pool.maxConexoes(), pool.maxConexoesPorRota(), pool.ttl(),
                         pool.keepAlive(), Duration.ofSeconds(2), pool.timeoutObterConexao(), pool.timeoutResposta()),
-                propriedades.fanOut(), propriedades.retry());
+                propriedades.fanOut(), propriedades.retry(), propriedades.cota(), propriedades.paginacao());
         var chamada = chamarInalcancavel(comConexaoLenta, Duration.ofMillis(100));
         var erro = chamada.erro();
 
@@ -109,7 +110,7 @@ class FontePrimariaConfigTest {
 
     private static ResourceAccessException chamar(RestClient restClient) {
         return catchThrowableOfType(ResourceAccessException.class,
-                () -> restClient.get().uri("/mainframe/operacoes/1/blocos/operacao").retrieve().body(String.class));
+                () -> restClient.get().uri("/mainframe/custodias/SF/operacoes/1/blocos/operacao").retrieve().body(String.class));
     }
 
     private record Chamada(ResourceAccessException erro, long duracaoMs, boolean ignoradaPeloCircuito) {
@@ -119,6 +120,7 @@ class FontePrimariaConfigTest {
         return new FontePrimariaProperties(INALCANCAVEL, "classpath:trancode/layouts/",
                 new FontePrimariaProperties.Pool(50, 50, Duration.ofMinutes(5), Duration.ofSeconds(30),
                         Duration.ofMillis(50), Duration.ofMillis(50), Duration.ofSeconds(1)),
-                new FontePrimariaProperties.FanOut(16), new FontePrimariaProperties.Retry(Duration.ofMillis(50)));
+                new FontePrimariaProperties.FanOut(16), new FontePrimariaProperties.Retry(Duration.ofMillis(50)),
+                new FontePrimariaProperties.Cota(1500, 3), new FontePrimariaProperties.Paginacao(20));
     }
 }

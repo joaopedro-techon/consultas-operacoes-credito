@@ -1,10 +1,15 @@
 package br.com.consultas.operacoescredito.adapters.out.dynamodb;
 
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos;
+import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeCustodia;
 import br.com.consultas.operacoescredito.adapters.out.cache.ChaveDeBloco;
 import br.com.consultas.operacoescredito.application.port.out.FalhaNaFonteDeOperacoesException;
+import br.com.consultas.operacoescredito.config.observabilidade.MetricasDeCustodia;
 import br.com.consultas.operacoescredito.domain.Bloco;
 import br.com.consultas.operacoescredito.domain.CriterioConsulta;
+import br.com.consultas.operacoescredito.domain.Custodia;
+import br.com.consultas.operacoescredito.domain.PrecedenciaDeCustodia;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.bulkhead.BulkheadConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
@@ -34,7 +39,10 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -55,6 +63,8 @@ class VisaoConsolidadaDynamoDbAdapterTest {
 
     private final DynamoDbFalso dynamoDb = new DynamoDbFalso();
     private final CircuitBreaker circuitBreaker = CircuitBreaker.of("dynamodb", circuito());
+    private final CacheDeCustodiaEmMemoria cache = new CacheDeCustodiaEmMemoria();
+    private final SimpleMeterRegistry metricas = new SimpleMeterRegistry();
 
     @Test
     void lotesDeUmaConsultaNaoPassamDoTetoDeLotesSimultaneos() {
@@ -125,7 +135,8 @@ class VisaoConsolidadaDynamoDbAdapterTest {
     @Test
     void itemDoIndiceSemTextoDetalheVira502SemContarNoCircuito() {
         dynamoDb.responderQuery(requisicao -> QueryResponse.builder()
-                .items(Map.of(VisaoConsolidadaDynamoDbAdapter.PK, AttributeValue.fromN("1")))
+                .items(Map.of(VisaoConsolidadaDynamoDbAdapter.PK, AttributeValue.fromN("1"),
+                        VisaoConsolidadaDynamoDbAdapter.SK, AttributeValue.fromS("SF#EXPAND#OPERACAO")))
                 .build());
         var adapter = adapter(4);
 
@@ -181,6 +192,83 @@ class VisaoConsolidadaDynamoDbAdapterTest {
         assertThat(operacoes.getFirst().blocosIndisponiveis()).isEmpty();
     }
 
+    @Test
+    void semCustodiaEmCacheProcuraNasQuatroCustodiasEFicaComADeMaiorPrecedencia() {
+        dynamoDb.custodiasComItens(Set.of(Custodia.SF, Custodia.NSF));
+        var adapter = adapter(4);
+
+        var operacoes = adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO, Bloco.SALDO));
+
+        assertThat(operacoes).singleElement().satisfies(operacao -> {
+            assertThat(operacao.custodia()).contains(Custodia.NSF);
+            assertThat(operacao.blocosIndisponiveis()).isEmpty();
+        });
+        // 4 custódias × 2 blocos num só BatchGetItem
+        assertThat(dynamoDb.chamadasBatch()).isEqualTo(1);
+        assertThat(dynamoDb.custodiasPedidas()).containsExactlyInAnyOrder(Custodia.values());
+        assertThat(cache.buscar(1)).contains(Custodia.NSF);
+        assertThat(metricas.get(MetricasDeCustodia.DUPLICADA).counter().count()).isEqualTo(1);
+    }
+
+    @Test
+    void comCustodiaEmCachePedeSoNela() {
+        cache.gravar(1, Custodia.F5);
+        dynamoDb.custodiasComItens(Set.of(Custodia.F5));
+        var adapter = adapter(4);
+
+        var operacoes = adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO, Bloco.SALDO));
+
+        assertThat(operacoes).singleElement().satisfies(operacao ->
+                assertThat(operacao.custodia()).contains(Custodia.F5));
+        assertThat(dynamoDb.custodiasPedidas()).containsExactly(Custodia.F5);
+    }
+
+    @Test
+    void custodiaDoCacheSemAOperacaoRefazADescoberta() {
+        cache.gravar(1, Custodia.F5);
+        dynamoDb.custodiasComItens(Set.of(Custodia.OD));
+        var adapter = adapter(4);
+
+        var operacoes = adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO));
+
+        assertThat(operacoes).singleElement().satisfies(operacao ->
+                assertThat(operacao.custodia()).contains(Custodia.OD));
+        assertThat(dynamoDb.chamadasBatch()).isEqualTo(2);
+        assertThat(cache.buscar(1)).contains(Custodia.OD);
+    }
+
+    @Test
+    void operacaoInexistenteEmTodasAsCustodiasEsqueceACustodiaLembrada() {
+        cache.gravar(1, Custodia.F5);
+        dynamoDb.custodiasComItens(Set.of());
+        var adapter = adapter(4);
+
+        assertThat(adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO))).isEmpty();
+        assertThat(cache.buscar(1)).isEmpty();
+        assertThat(cache.remocoes.get()).isEqualTo(1);
+    }
+
+    @Test
+    void operacaoRepetidaNoIndiceFicaComACustodiaDeMaiorPrecedencia() {
+        dynamoDb.responderQuery(requisicao -> QueryResponse.builder()
+                .items(itemDoIndice(1, Custodia.SF), itemDoIndice(1, Custodia.NSF), itemDoIndice(2, Custodia.OD))
+                .build());
+        var adapter = adapter(4);
+
+        var operacoes = adapter.buscar(new CriterioConsulta.PorCliente(CLIENTE, OptionalInt.of(2)),
+                EnumSet.of(Bloco.OPERACAO, Bloco.PARCELAS));
+
+        assertThat(operacoes).extracting(operacao -> operacao.custodia().orElseThrow())
+                .containsExactly(Custodia.NSF, Custodia.OD);
+        assertThat(dynamoDb.custodiasPedidas()).containsExactlyInAnyOrder(Custodia.NSF, Custodia.OD);
+    }
+
+    private static Map<String, AttributeValue> itemDoIndice(long id, Custodia custodia) {
+        return Map.of(VisaoConsolidadaDynamoDbAdapter.PK, AttributeValue.fromN(Long.toString(id)),
+                VisaoConsolidadaDynamoDbAdapter.SK, AttributeValue.fromS(custodia.codigo() + "#EXPAND#OPERACAO"),
+                VisaoConsolidadaDynamoDbAdapter.TEXTO_DETALHE, AttributeValue.fromB(SdkBytes.fromByteArray(JSON_VAZIO)));
+    }
+
     private VisaoConsolidadaDynamoDbAdapter adapter(int maxLotesSimultaneos) {
         var properties = new DynamoDbProperties("operacoes-credito", "sa-east-1", null, null, "gsi-cliente",
                 "gsi-conta", Duration.ofSeconds(1), Duration.ofMillis(100), maxLotesSimultaneos,
@@ -190,8 +278,8 @@ class VisaoConsolidadaDynamoDbAdapterTest {
         var resiliencia = new ResilienciaDynamoDb(circuitBreaker, bulkhead("dynamodb"),
                 bulkhead("dynamodb-cliente-conta"), RateLimiter.of("dynamodb", RateLimiterConfig.custom()
                 .limitForPeriod(10_000).timeoutDuration(Duration.ZERO).build()), Duration.ofSeconds(1));
-        return new VisaoConsolidadaDynamoDbAdapter(dynamoDb, properties, ObservationRegistry.NOOP, new SemCache(),
-                resiliencia);
+        return new VisaoConsolidadaDynamoDbAdapter(dynamoDb, properties, ObservationRegistry.NOOP, cache, cache,
+                resiliencia, PrecedenciaDeCustodia.PADRAO, metricas);
     }
 
     private static Bulkhead bulkhead(String nome) {
@@ -222,16 +310,48 @@ class VisaoConsolidadaDynamoDbAdapterTest {
         return saida.toByteArray();
     }
 
-    private static final class SemCache implements CacheDeBlocos {
+    /** Cache em memória: só as custódias (os blocos nunca estão em cache), para ver o que o adapter lembra. */
+    private static final class CacheDeCustodiaEmMemoria implements CacheDeBlocos, CacheDeCustodia {
+
+        private final Map<Long, Custodia> custodias = new ConcurrentHashMap<>();
+        private final AtomicInteger remocoes = new AtomicInteger();
 
         @Override
-        public Map<ChaveDeBloco, byte[]> buscar(Collection<ChaveDeBloco> chaves) {
-            return Map.of();
+        public LeituraDoCache buscar(Collection<ChaveDeBloco> chaves, Collection<Long> custodiasDe) {
+            var encontradas = new HashMap<Long, Custodia>();
+            custodiasDe.forEach(id -> {
+                var custodia = custodias.get(id);
+                if (custodia != null) {
+                    encontradas.put(id, custodia);
+                }
+            });
+            return new LeituraDoCache(Map.of(), encontradas);
         }
 
         @Override
-        public void gravar(Map<ChaveDeBloco, byte[]> blocos) {
-            // sem cache
+        public void gravar(Map<ChaveDeBloco, byte[]> blocos, Map<Long, Custodia> custodias) {
+            this.custodias.putAll(custodias);
+        }
+
+        @Override
+        public Optional<Custodia> buscar(long idOperacao) {
+            return Optional.ofNullable(custodias.get(idOperacao));
+        }
+
+        @Override
+        public void gravar(long idOperacao, Custodia custodia) {
+            custodias.put(idOperacao, custodia);
+        }
+
+        @Override
+        public void gravarTodas(Map<Long, Custodia> custodias) {
+            this.custodias.putAll(custodias);
+        }
+
+        @Override
+        public void remover(long idOperacao) {
+            remocoes.incrementAndGet();
+            custodias.remove(idOperacao);
         }
     }
 
@@ -241,6 +361,7 @@ class VisaoConsolidadaDynamoDbAdapterTest {
         private volatile Function<QueryRequest, QueryResponse> query = requisicao -> QueryResponse.builder().build();
         private volatile Function<BatchGetItemRequest, BatchGetItemResponse> batch = DynamoDbFalso::tudoEncontrado;
         private volatile Duration demoraDoBatch = Duration.ZERO;
+        private final Set<Custodia> custodiasPedidas = ConcurrentHashMap.newKeySet();
         private final AtomicInteger chamadasBatch = new AtomicInteger();
         private final AtomicInteger emAndamento = new AtomicInteger();
         private final AtomicInteger maximoEmAndamento = new AtomicInteger();
@@ -250,6 +371,7 @@ class VisaoConsolidadaDynamoDbAdapterTest {
                 var itens = new ArrayList<Map<String, AttributeValue>>();
                 for (long id = 1; id <= quantidade; id++) {
                     itens.add(Map.of(VisaoConsolidadaDynamoDbAdapter.PK, AttributeValue.fromN(Long.toString(id)),
+                            VisaoConsolidadaDynamoDbAdapter.SK, AttributeValue.fromS("SF#EXPAND#OPERACAO"),
                             VisaoConsolidadaDynamoDbAdapter.TEXTO_DETALHE,
                             AttributeValue.fromB(SdkBytes.fromByteArray(JSON_VAZIO))));
                 }
@@ -269,6 +391,27 @@ class VisaoConsolidadaDynamoDbAdapterTest {
             this.demoraDoBatch = demora;
         }
 
+        /** Só as custódias informadas têm itens (todos os blocos pedidos). */
+        void custodiasComItens(Set<Custodia> custodias) {
+            batch = requisicao -> {
+                var itens = new ArrayList<Map<String, AttributeValue>>();
+                for (var chave : chaves(requisicao)) {
+                    var sk = chave.get(VisaoConsolidadaDynamoDbAdapter.SK).s();
+                    if (custodias.stream().anyMatch(custodia -> sk.startsWith(custodia.codigo() + "#"))) {
+                        var item = new HashMap<>(chave);
+                        item.put(VisaoConsolidadaDynamoDbAdapter.TEXTO_DETALHE,
+                                AttributeValue.fromB(SdkBytes.fromByteArray(JSON_VAZIO)));
+                        itens.add(item);
+                    }
+                }
+                return BatchGetItemResponse.builder().responses(Map.of(tabela(requisicao), itens)).build();
+            };
+        }
+
+        Set<Custodia> custodiasPedidas() {
+            return custodiasPedidas;
+        }
+
         int chamadasBatch() {
             return chamadasBatch.get();
         }
@@ -285,6 +428,10 @@ class VisaoConsolidadaDynamoDbAdapterTest {
         @Override
         public BatchGetItemResponse batchGetItem(BatchGetItemRequest requisicao) {
             chamadasBatch.incrementAndGet();
+            for (var chave : chaves(requisicao)) {
+                var sk = chave.get(VisaoConsolidadaDynamoDbAdapter.SK).s();
+                Custodia.porCodigo(sk.substring(0, sk.indexOf('#'))).ifPresent(custodiasPedidas::add);
+            }
             maximoEmAndamento.accumulateAndGet(emAndamento.incrementAndGet(), Math::max);
             try {
                 if (!demoraDoBatch.isZero()) {

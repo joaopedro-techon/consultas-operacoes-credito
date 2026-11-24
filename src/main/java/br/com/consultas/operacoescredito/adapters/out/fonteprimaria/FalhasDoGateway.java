@@ -5,6 +5,7 @@ import br.com.consultas.operacoescredito.config.resiliencia.PrazoDaRequisicao;
 import io.github.resilience4j.bulkhead.BulkheadFullException;
 import io.github.resilience4j.ratelimiter.RequestNotPermitted;
 import org.apache.hc.client5.http.ConnectTimeoutException;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.ResourceAccessException;
 
@@ -16,7 +17,7 @@ import java.time.Duration;
  * Classificação das falhas de uma chamada ao gateway do mainframe, usada pelo retry e pelo circuit breaker
  * (ADR-0009).
  * <ul>
- *     <li><b>Retentável</b>: 5xx, ou falha/timeout ao abrir a conexão (o pedido nem chegou ao mainframe).
+ *     <li><b>Retentável</b>: 5xx, 429 do mainframe (com o backoff do retry), ou falha/timeout ao abrir a conexão (o pedido nem chegou ao mainframe).
  *     Nunca 4xx, nem timeout de resposta (o mainframe está lento: tentar de novo só piora) nem timeout do pool
  *     (a aplicação está saturada);</li>
  *     <li><b>Falha da dependência</b> (conta para abrir o circuito): 5xx e qualquer falha de I/O, inclusive
@@ -45,11 +46,15 @@ final class FalhasDoGateway {
             return false;
         }
         return erro instanceof HttpServerErrorException
+                || erro instanceof HttpClientErrorException.TooManyRequests
                 || erro instanceof ResourceAccessException && falhaAoConectar(erro);
     }
 
+    /** 5xx, I/O e 429 do mainframe (a cota dele estourou do lado dele: ADR-0014). */
     static boolean falhaDaDependencia(Throwable erro) {
-        return erro instanceof HttpServerErrorException || erro instanceof ResourceAccessException;
+        return erro instanceof HttpServerErrorException
+                || erro instanceof HttpClientErrorException.TooManyRequests
+                || erro instanceof ResourceAccessException;
     }
 
     static boolean ignoradaPeloCircuito(Throwable erro) {
