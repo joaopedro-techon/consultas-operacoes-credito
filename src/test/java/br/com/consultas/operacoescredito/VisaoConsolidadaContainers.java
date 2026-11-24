@@ -1,5 +1,7 @@
 package br.com.consultas.operacoescredito;
 
+import java.time.Duration;
+
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.test.context.DynamicPropertyRegistrar;
@@ -27,7 +29,9 @@ public class VisaoConsolidadaContainers {
                         MountableFile.forHostPath("localstack/init/ready.d/01-visao-consolidada.sh", 0755),
                         "/etc/localstack/init/ready.d/01-visao-consolidada.sh")
                 .withCopyFileToContainer(MountableFile.forHostPath("localstack/massa"), "/etc/localstack/massa")
-                .waitingFor(Wait.forLogMessage(".*VISAO_CONSOLIDADA_PRONTA.*", 1));
+                // A massa tem dezenas de PutItem via awslocal (~0,2 s cada); o default de 60 s não basta.
+                .waitingFor(Wait.forLogMessage(".*VISAO_CONSOLIDADA_PRONTA.*", 1)
+                        .withStartupTimeout(Duration.ofMinutes(4)));
     }
 
     @Bean
