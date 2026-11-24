@@ -14,12 +14,14 @@ spring:
     timeout-per-shutdown-phase: 30s
   data:
     # Valkey (protocolo Redis): cache por bloco da visão consolidada. Timeout curto: o cache é só otimização
-    # (fail-open), lento é tratado como indisponível e a consulta segue no DynamoDB.
+    # (fail-open), lento é tratado como indisponível e a consulta segue no DynamoDB. Valkey standalone ou
+    # replication group (cluster mode desligado); o código não usa comandos multi-slot além do MGET (ADR-0011).
     redis:
       host: ${CONSULTAS_VALKEY_HOST:localhost}
       port: ${CONSULTAS_VALKEY_PORTA:6379}
       timeout: ${CONSULTAS_VALKEY_TIMEOUT:10ms}
-      connect-timeout: 100ms
+      # Host inalcançável (pacotes descartados) custa no máximo isto por tentativa de conexão, até o circuito abrir
+      connect-timeout: ${CONSULTAS_VALKEY_CONNECT_TIMEOUT:20ms}
       client-name: ${spring.application.name}
       repositories:
         enabled: false
@@ -103,6 +105,14 @@ consultas:
   cache:
     habilitado: ${CONSULTAS_CACHE_HABILITADO:true}
     ttl: ${CONSULTAS_CACHE_TTL:5m}
+    # Leituras e gravações em comandos de até 100 chaves, em pipeline (nenhum comando gigante no Valkey)
+    chaves-por-comando: 100
+    # Consultas com mais chaves (operações × blocos) vão direto ao DynamoDB, sem ler nem gravar no cache
+    max-chaves-por-consulta: ${CONSULTAS_CACHE_MAX_CHAVES_POR_CONSULTA:500}
+    # Sem ao menos isto do prazo da requisição, nem tenta o cache (maior que spring.data.redis.timeout)
+    prazo-minimo-restante: 20ms
+    # Gravações fora da requisição em andamento; acima disso a gravação é descartada
+    max-gravacoes-simultaneas: 32
   # Fonte primária: gateway do mainframe (WireMock no ambiente local); sem cache (ADR-0002)
   fonte-primaria:
     url: ${CONSULTAS_FONTE_PRIMARIA_URL:http://localhost:8089}

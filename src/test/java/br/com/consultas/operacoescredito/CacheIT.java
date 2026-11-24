@@ -46,6 +46,7 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
  * Cache por bloco no Valkey observado pela API HTTP (ADR-0002, seção 6 da especificação).
@@ -98,7 +99,10 @@ class CacheIT {
     }
 
     @BeforeEach
-    void valkeyDisponivelEVazio() throws IOException {
+    void valkeyDisponivelEVazio() throws IOException, InterruptedException {
+        // Gravações no cache saem fora da requisição: as do teste anterior terminam (ou desistem no timeout de
+        // comando, 10 ms) antes de limpar o Valkey
+        Thread.sleep(100);
         for (var toxic : proxyValkey.toxics().getAll()) {
             toxic.remove();
         }
@@ -126,6 +130,8 @@ class CacheIT {
     @Test
     void segundaChamadaLeDoDynamoDbSoOBlocoAusente() {
         var primeira = dados(consultarOperacao("100000004", "parcelas,amortizacoes"));
+        aguardarNoCache("op:100000004:operacao", "op:100000004:originacao", "op:100000004:parcelas",
+                "op:100000004:amortizacoes");
 
         // Depois da primeira chamada, tudo muda no DynamoDB: só o que não estava em cache pode vir novo
         gravarBloco(100000004L, "ORIGINACAO", "{\"id_operacao\":100000004,\"canal_contratacao\":\"ALTERADO\"}");
@@ -140,6 +146,7 @@ class CacheIT {
         assertThat(segunda.get("saldo")).isEqualTo(JSON.readTree(
                 "{\"id_operacao\":100000004,\"saldo_devedor_operacao\":1.23}"));
         // O bloco lido agora também passa a ser servido do cache
+        aguardarNoCache("op:100000004:saldo");
         gravarBloco(100000004L, "SALDO", "{\"id_operacao\":100000004,\"saldo_devedor_operacao\":9.99}");
         assertThat(dados(consultarOperacao("100000004", "saldo")).get("saldo"))
                 .isEqualTo(segunda.get("saldo"));
@@ -148,6 +155,7 @@ class CacheIT {
     @Test
     void cacheGuardaPorOperacaoEBlocoOGzipComoVeioDoDynamoDbComTtl() {
         consultarOperacao("100000001", TODOS_OS_BLOCOS);
+        await().atMost(Duration.ofSeconds(5)).until(() -> valkey.sync().dbsize() == 9);
 
         for (var bloco : List.of("operacao", "originacao", "componentes", "parcelas", "amortizacoes", "recebimentos",
                 "plano", "saldo", "controles_iof")) {
@@ -164,6 +172,8 @@ class CacheIT {
         consultarOperacao("100000003", "plano,saldo")
                 .expectHeader().valueEquals(HEADER_INDISPONIVEIS, "plano,saldo");
 
+        // Os blocos existentes vão na mesma gravação: com eles no cache, a gravação terminou
+        aguardarNoCache("op:100000003:operacao", "op:100000003:originacao");
         assertThat(valkey.sync().exists(chave("op:100000003:plano"), chave("op:100000003:saldo"))).isZero();
         gravarBloco(100000003L, "SALDO", "{\"id_operacao\":100000003,\"saldo_devedor_operacao\":10.00}");
         consultarOperacao("100000003", "plano,saldo")
@@ -177,6 +187,7 @@ class CacheIT {
     void clienteEContaUsamOCacheDosBlocosMasNaoDaListaDeOperacoes(String tipo, String parametro, String valor) {
         var primeira = lista(consultarLista(tipo, parametro, valor, "parcelas"));
         assertThat(primeira).hasSize(1);
+        aguardarNoCache("op:100000006:originacao", "op:100000006:parcelas");
 
         gravarBloco(100000006L, "PARCELAS", "[]");
         var operacaoNova = textoNoDynamoDb(100000006L, "OPERACAO").replace("100000006", "900000006");
@@ -194,14 +205,14 @@ class CacheIT {
         assertThat(segunda.get(0).get("parcelas").isNull()).isTrue();
         // Os blocos da operação já consultada vêm do cache
         assertThat(segunda.get(1)).isEqualTo(primeira.get(0));
+        aguardarNoCache("op:900000006:originacao");
         assertThat(valkey.sync().exists(chave("op:100000006:operacao"))).as("operacao vem do GSI").isZero();
-        assertThat(valkey.sync().exists(chave("op:900000006:originacao"))).isOne();
     }
 
     @Test
     void rotaDaFontePrimariaNaoUsaCache() {
         consultarOperacao("100000002", "parcelas");
-        assertThat(valkey.sync().exists(chave("op:100000002:parcelas"))).isOne();
+        aguardarNoCache("op:100000002:parcelas");
         var chamadasAntes = chamadasAoGateway("100000002");
 
         client.get().uri(ROTA_FONTE_PRIMARIA + "?id_operacao=100000002&expand=parcelas,saldo")
@@ -242,11 +253,16 @@ class CacheIT {
     }
 
     @Test
-    void comOValkeyForaOCircuitBreakerAbreEAsConsultasParamDeTentarOValkey() throws IOException {
+    void comOValkeyForaOCircuitBreakerAbreEAsConsultasParamDeTentarOValkey() throws Exception {
+        var indisponiveisAntes = metrica("consultas.cache", "resultado:indisponivel");
         proxyValkey.disable();
         for (int i = 0; i < 10; i++) {
             consultarOperacao("100000001", "parcelas");
         }
+        await().atMost(Duration.ofSeconds(5)).until(() -> circuitBreakers.circuitBreaker("valkey").getState()
+                == io.github.resilience4j.circuitbreaker.CircuitBreaker.State.OPEN);
+        // Gravações que ainda estavam saindo (fora da requisição) terminam antes da contagem
+        Thread.sleep(200);
         var chamadasAoValkey = chamadasAoValkey();
 
         for (int i = 0; i < 5; i++) {
@@ -255,6 +271,15 @@ class CacheIT {
 
         assertThat(chamadasAoValkey()).isEqualTo(chamadasAoValkey);
         assertThat(metrica("resilience4j.circuitbreaker.state", "name:valkey", "state:open")).isEqualTo(1.0);
+        // Valkey fora e circuito aberto não são misses: os 15 blocos procurados contam como indisponíveis
+        // (os blocos sempre presentes operacao/originacao e parcelas, por consulta)
+        assertThat(metrica("consultas.cache", "resultado:indisponivel") - indisponiveisAntes).isEqualTo(45);
+    }
+
+    /** Espera as chaves aparecerem no Valkey: a gravação no cache sai fora da requisição. */
+    private void aguardarNoCache(String... chaves) {
+        var bytes = java.util.Arrays.stream(chaves).map(CacheIT::chave).toArray(byte[][]::new);
+        await().atMost(Duration.ofSeconds(5)).until(() -> valkey.sync().exists(bytes) == chaves.length);
     }
 
     private RestTestClient.ResponseSpec consultarOperacao(String idOperacao, String expand) {

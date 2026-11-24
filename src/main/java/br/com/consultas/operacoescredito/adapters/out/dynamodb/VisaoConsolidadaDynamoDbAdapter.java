@@ -47,8 +47,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * (mais recentes primeiro), que já traz o bloco {@code operacao}, e depois um {@code BatchGetItem}
  * dos demais blocos pedidos, em lotes paralelos de até 100 chaves.
  * <p>
- * Os blocos lidos da tabela base passam pelo {@link CacheDeBlocos} (ADR-0002): um {@code MGET} de todas as chaves
- * operação × bloco, {@code BatchGetItem} só dos ausentes e gravação deles no cache. A {@code Query} no GSI (a lista
+ * Os blocos lidos da tabela base passam pelo {@link CacheDeBlocos} (ADR-0002, ADR-0011): leitura de todas as chaves
+ * operação × bloco, {@code BatchGetItem} só dos ausentes e gravação deles no cache (fora da requisição). A {@code Query} no GSI (a lista
  * de operações do cliente/conta, com o bloco {@code operacao}) nunca é cacheada.
  * <p>
  * Resiliência ({@link ResilienciaDynamoDb}): a consulta passa pelos bulkheads do tipo de consulta e pelo rate
@@ -191,7 +191,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     }
 
     /**
-     * Lê os blocos das operações: primeiro do cache (um {@code MGET} com todas as chaves), depois da tabela base
+     * Lê os blocos das operações: primeiro do cache (todas as chaves de uma vez), depois da tabela base
      * só os ausentes, que são gravados no cache. Bloco inexistente no DynamoDB não é gravado.
      *
      * @return {@code texto_detalhe} por operação e bloco; blocos inexistentes ficam ausentes
