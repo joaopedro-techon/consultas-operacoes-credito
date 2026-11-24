@@ -199,6 +199,59 @@ class EventoDeConsumoIT {
     }
 
     @Test
+    void documentoComPontuacaoDentroDoFiltroNuncaVaiEmClaroEmNenhumaForma() {
+        var correlationId = novoCorrelationId();
+        var cpfPontuado = "529.982.247-25";
+        var cnpjPontuado = "12.ABC.345/01DE-35";
+        var filtro = "operacao.cpf_cnpj==" + cpfPontuado + ",originacao.dependencia_contabil==" + cnpjPontuado;
+
+        client.get().uri(ROTA + "?cpf_cnpj=" + CPF + "&filter={filtro}", filtro)
+                .header("x-tipo-consulta", "CLIENTE")
+                .header("x-correlationid", correlationId)
+                .exchange()
+                .expectStatus().isOk();
+
+        var evento = evento(correlationId);
+        // Sem a pontuação, o HMAC do filtro casa com o cpf_cnpj_hmac
+        assertThat(evento.path("filtro").asString()).isEqualTo("operacao.cpf_cnpj==" + EventosDeConsumoContainers.hmac(CPF)
+                + ",originacao.dependencia_contabil==" + EventosDeConsumoContainers.hmac(CNPJ_ALFANUMERICO));
+        assertThat(evento.path("cpf_cnpj_hmac").asString()).isEqualTo(EventosDeConsumoContainers.hmac(CPF));
+        assertThat(eventos.get(correlationId)).doesNotContain(CPF, cpfPontuado, "529.982", "982.247", "247-25",
+                CNPJ_ALFANUMERICO, cnpjPontuado, "ABC.345", "345/01DE", "345\\/01DE");
+    }
+
+    @Test
+    void consumidorForaDoFormatoVaiComoInvalidoNoEvento() {
+        var correlationId = novoCorrelationId();
+
+        client.get().uri(ROTA + "?id_operacao=100000001")
+                .header("x-tipo-consulta", "OPERACAO")
+                .header("x-consumidor", "consumidor com espaco e cpf " + CPF)
+                .header("x-correlationid", correlationId)
+                .exchange()
+                .expectStatus().isOk();
+
+        var evento = evento(correlationId);
+        assertThat(evento.path("consumidor").asString()).isEqualTo("invalido");
+        assertThat(eventos.get(correlationId)).doesNotContain(CPF);
+    }
+
+    @Test
+    void parametroRepetidoE400ComEvento() {
+        var correlationId = novoCorrelationId();
+
+        client.get().uri(ROTA + "?id_operacao=100000001&expand=parcelas&expand=saldo")
+                .header("x-tipo-consulta", "OPERACAO")
+                .header("x-correlationid", correlationId)
+                .exchange()
+                .expectStatus().isBadRequest();
+
+        var evento = evento(correlationId);
+        assertThat(evento.path("status_http").asInt()).isEqualTo(400);
+        assertThat(evento.path("codigo_erro").asString()).isEqualTo("requisicao_invalida");
+    }
+
+    @Test
     void operacaoInexistenteGeraEventoComStatusECodigoDeErro() {
         var correlationId = novoCorrelationId();
 

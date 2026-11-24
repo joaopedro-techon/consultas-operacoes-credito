@@ -89,7 +89,9 @@ class ConsultaOperacaoIT {
                 .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
                 .expectBody()
                 .jsonPath("$.detail").value(String.class, detail -> assertThat(detail)
-                        .contains("CONTRATO", "OPERACAO", "CLIENTE", "CONTA"));
+                        .contains("x-tipo-consulta", "OPERACAO", "CLIENTE", "CONTA")
+                        // o valor recebido não é ecoado (pode ser qualquer coisa, inclusive dado pessoal)
+                        .doesNotContain("CONTRATO"));
     }
 
     @ParameterizedTest(name = "{0} com {1} -> 400")

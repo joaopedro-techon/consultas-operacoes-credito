@@ -30,19 +30,4 @@ public record Consulta(CriterioConsulta criterio, Set<Bloco> blocos, List<String
         blocos = Collections.unmodifiableSet(EnumSet.copyOf(todos));
         campos = campos == null ? List.of() : List.copyOf(campos);
     }
-
-    /** Consulta sem filtro. */
-    public Consulta(CriterioConsulta criterio, Set<Bloco> blocos, List<String> campos) {
-        this(criterio, blocos, campos, Optional.empty());
-    }
-
-    /** Consulta com os blocos pedidos, todos completos e sem filtro. */
-    public Consulta(CriterioConsulta criterio, Set<Bloco> blocos) {
-        this(criterio, blocos, List.of());
-    }
-
-    /** Consulta só com os blocos que vêm sempre. */
-    public static Consulta comBlocosPadrao(CriterioConsulta criterio) {
-        return new Consulta(criterio, Set.of());
-    }
 }

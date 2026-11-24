@@ -38,10 +38,32 @@ record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj
             TipoConsulta.CLIENTE, CPF_CNPJ,
             TipoConsulta.CONTA, CONTA));
 
+    /** Parâmetros do contrato: cada um pode vir no máximo uma vez (listas vão separadas por vírgula num só). */
+    static final List<String> PARAMETROS = List.of(ID_OPERACAO, CPF_CNPJ, CONTA, LIMITE_OPERACOES, EXPAND, FIELDS,
+            FILTER);
+    /** {@code id_operacao} bem formado: positivo, até 18 dígitos (cabe em {@code long}). */
+    static final Pattern NUMERO_OPERACAO = Pattern.compile("[1-9]\\d{0,17}");
+
     private static final Set<TipoConsulta> ACEITAM_LIMITE = Set.of(TipoConsulta.CLIENTE, TipoConsulta.CONTA);
-    private static final Pattern NUMERO_OPERACAO = Pattern.compile("[1-9]\\d{0,17}");
-    private static final Pattern DIGITOS = Pattern.compile("\\d+");
+    private static final Pattern CONTA_VALIDA =
+            Pattern.compile("\\d{1," + CriterioConsulta.PorConta.TAMANHO_MAXIMO_CONTA + "}");
     private static final Pattern LIMITE = Pattern.compile("\\d{1,4}");
+
+    /**
+     * Rejeita parâmetro do contrato repetido ({@code filter=a&filter=b}): o Spring juntaria os valores com vírgula,
+     * o que mudaria o sentido do pedido (dois filtros viram um "ou") sem o consumidor saber.
+     *
+     * @param parametros parâmetros da requisição, como em {@code HttpServletRequest#getParameterMap()}
+     */
+    static void rejeitarRepetidos(Map<String, String[]> parametros) {
+        PARAMETROS.stream()
+                .filter(parametro -> parametros.get(parametro) != null && parametros.get(parametro).length > 1)
+                .findFirst()
+                .ifPresent(parametro -> {
+                    throw new RequisicaoInvalidaException("Parâmetro " + parametro + " informado mais de uma vez; "
+                            + "informe-o uma única vez (listas vão separadas por vírgula no mesmo parâmetro)");
+                });
+    }
 
     CriterioConsulta criterio() {
         var tipo = tipo();
@@ -62,8 +84,9 @@ record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj
     }
 
     private String contaValida() {
-        if (!DIGITOS.matcher(conta).matches()) {
-            throw new RequisicaoInvalidaException("Parâmetro " + CONTA + " deve conter só dígitos");
+        if (!CONTA_VALIDA.matcher(conta).matches()) {
+            throw new RequisicaoInvalidaException("Parâmetro " + CONTA + " deve ter só dígitos, de 1 a "
+                    + CriterioConsulta.PorConta.TAMANHO_MAXIMO_CONTA + " dígitos");
         }
         return conta;
     }
@@ -127,8 +150,8 @@ record ParametrosConsulta(String tipoConsulta, String idOperacao, String cpfCnpj
         return Arrays.stream(TipoConsulta.values())
                 .filter(tipo -> tipo.name().equals(tipoConsulta))
                 .findFirst()
-                .orElseThrow(() -> new RequisicaoInvalidaException("Valor '" + tipoConsulta + "' inválido para o header "
-                        + HEADER_TIPO_CONSULTA + ". Valores válidos: " + validos));
+                .orElseThrow(() -> new RequisicaoInvalidaException("Header " + HEADER_TIPO_CONSULTA
+                        + " inválido. Valores válidos: " + validos));
     }
 
     private void validarCoerencia(TipoConsulta tipo) {

@@ -8,13 +8,5 @@ import java.util.function.Supplier;
  */
 public interface ObservadorDeEtapas {
 
-    /** Executa o passo sem medir. */
-    ObservadorDeEtapas NENHUM = new ObservadorDeEtapas() {
-        @Override
-        public <T> T observar(String etapa, Supplier<T> passo) {
-            return passo.get();
-        }
-    };
-
     <T> T observar(String etapa, Supplier<T> passo);
 }

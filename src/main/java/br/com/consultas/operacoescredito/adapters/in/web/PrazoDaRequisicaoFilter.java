@@ -2,7 +2,6 @@ package br.com.consultas.operacoescredito.adapters.in.web;
 
 import br.com.consultas.operacoescredito.config.resiliencia.PrazoDaRequisicao;
 import br.com.consultas.operacoescredito.config.resiliencia.PrazoProperties;
-import br.com.consultas.operacoescredito.domain.TipoConsulta;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -37,25 +36,16 @@ class PrazoDaRequisicaoFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
-        var tipo = ContextoRequisicaoFilter.tipoConsulta(request);
-        if (tipo == null || !ehTipoValido(tipo)) {
+        var tipo = RequisicaoDeConsulta.tipoConsultaValido(request);
+        if (tipo.isEmpty()) {
             chain.doFilter(request, response);
             return;
         }
-        PrazoDaRequisicao.iniciar(prazos.de(TipoConsulta.valueOf(tipo)));
+        PrazoDaRequisicao.iniciar(prazos.de(tipo.get()));
         try {
             chain.doFilter(request, response);
         } finally {
             PrazoDaRequisicao.encerrar();
         }
-    }
-
-    private static boolean ehTipoValido(String tipo) {
-        for (var valido : TipoConsulta.values()) {
-            if (valido.name().equals(tipo)) {
-                return true;
-            }
-        }
-        return false;
     }
 }

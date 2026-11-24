@@ -35,6 +35,7 @@ import java.util.stream.Collectors;
  *
  * <p>As condições ligadas por {@code ;} no nível de cima podem ter alvos diferentes; dentro de um
  * {@code ,} (ou) todas precisam ter o mesmo alvo, já que não há como "ou" remover itens de listas distintas.
+ * {@code operacao} e {@code originacao} contam como um só alvo (a operação), então podem ser ligados por "ou".
  */
 public final class FiltroDeOperacoes {
 
@@ -73,11 +74,10 @@ public final class FiltroDeOperacoes {
         return operacoes.stream().filter(this::operacaoAtende).map(this::filtrarListas).toList();
     }
 
+    /** As condições de {@code operacao}/{@code originacao} são avaliadas sobre os blocos da operação. */
     private boolean operacaoAtende(OperacaoConsultada operacao) {
-        return restricoes.entrySet().stream()
-                .filter(restricao -> restricao.getKey().daOperacao())
-                .allMatch(restricao -> operacao.blocos().get(restricao.getKey().bloco()) instanceof Map<?, ?> conteudo
-                        && restricao.getValue().test(conteudo));
+        var daOperacao = restricoes.get(Alvo.OPERACAO);
+        return daOperacao == null || daOperacao.test(operacao.blocos());
     }
 
     private OperacaoConsultada filtrarListas(OperacaoConsultada operacao) {
@@ -118,14 +118,21 @@ public final class FiltroDeOperacoes {
     }
 
     /**
-     * Lista cujos itens uma condição seleciona.
+     * Lista cujos itens uma condição seleciona. Condições de {@code operacao} e {@code originacao} têm todas o
+     * mesmo alvo, {@link #OPERACAO} (a própria operação), e podem ser ligadas por {@code ,} (ou) entre si.
      *
-     * @param caminhoLista caminho, dentro do bloco, até a lista alvo (vazio: os itens do bloco-lista ou,
-     *                     em {@code operacao}/{@code originacao}, a própria operação)
+     * @param bloco        bloco da lista alvo; {@code null} em {@link #OPERACAO}
+     * @param caminhoLista caminho, dentro do bloco, até a lista alvo (vazio: os itens do bloco-lista)
+     * @param daOperacao   {@code true} só em {@link #OPERACAO}: o predicado recebe o mapa de blocos da operação
      */
     private record Alvo(Bloco bloco, List<String> caminhoLista, boolean daOperacao) {
 
+        static final Alvo OPERACAO = new Alvo(null, List.of(), true);
+
         String descricao() {
+            if (daOperacao) {
+                return "operacao/originacao";
+            }
             return caminhoLista.isEmpty() ? bloco.nome() : bloco.nome() + "." + String.join(".", caminhoLista);
         }
     }
@@ -190,6 +197,12 @@ public final class FiltroDeOperacoes {
             var alvo = alvo(seletor, bloco, partes);
             var relativo = partes.subList(alvo.caminhoLista().size(), partes.size());
             Predicate<Map<?, ?>> predicado = item -> atende(valores(item, relativo), campo.tipo(), operador, argumentos);
+            if (alvo.daOperacao()) {
+                // Avaliado sobre os blocos da operação: sem o bloco, a operação não atende
+                Predicate<Map<?, ?>> noBloco = predicado;
+                predicado = blocosDaOperacao -> blocosDaOperacao.get(bloco) instanceof Map<?, ?> conteudo
+                        && noBloco.test(conteudo);
+            }
             return new Condicao(alvo, predicado);
         }
 
@@ -205,7 +218,7 @@ public final class FiltroDeOperacoes {
                 }
             }
             if (FILTRAM_A_OPERACAO.contains(bloco)) {
-                return new Alvo(bloco, List.of(), true);
+                return Alvo.OPERACAO;
             }
             throw new FiltroInvalidoException("Campo '" + seletor + "' do filter não pode ser filtrado: no bloco '"
                     + bloco.nome() + "' só campos de listas aninhadas aceitam filtro (filtro que remove a operação "

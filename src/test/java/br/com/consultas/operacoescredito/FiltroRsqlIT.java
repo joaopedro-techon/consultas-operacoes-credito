@@ -203,6 +203,31 @@ class FiltroRsqlIT {
     }
 
     @Test
+    void ouEntreOperacaoEOriginacaoFiltraAOperacao() {
+        consultar(OPERACAO, "", "operacao.situacao_operacao_credito==INEXISTENTE,originacao.canal_contratacao==MOBILE")
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.data.length()").isEqualTo(1);
+        consultar(OPERACAO, "", "operacao.situacao_operacao_credito==INEXISTENTE,originacao.canal_contratacao==AGENCIA")
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.data").isEmpty();
+    }
+
+    @Test
+    void filterRepetidoDevolve400EmVezDeVirarOu() {
+        client.get().uri(ROTA + "?id_operacao={id}&expand=parcelas&filter={a}&filter={b}", OPERACAO,
+                        "parcelas.situacao_parcela==LIQUIDADA", "parcelas.situacao_parcela==ABERTA")
+                .header("x-tipo-consulta", "OPERACAO")
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                .expectBody()
+                .jsonPath("$.detail").isEqualTo("Parâmetro filter informado mais de uma vez; informe-o uma única vez "
+                        + "(listas vão separadas por vírgula no mesmo parâmetro)");
+    }
+
+    @Test
     void filtroEmCampoForaDoFieldsFiltraAntesDaSelecao() {
         client.get().uri(ROTA + "?id_operacao={id}&expand=parcelas&fields={fields}&filter={filter}", OPERACAO,
                         "parcelas.numero_parcela_amortizacao", "parcelas.situacao_parcela==LIQUIDADA")
