@@ -63,10 +63,10 @@ class LogDeAcessoComCacheIT {
         var segunda = "teste-" + UUID.randomUUID();
 
         consultar(primeira, "parcelas");
-        // A gravação no cache acontece depois da resposta montada; espera o bloco aparecer no Valkey
+        // A gravação no cache acontece depois da resposta montada; espera a custódia (gravada depois dos blocos)
         await().atMost(Duration.ofSeconds(5)).until(() -> {
             try (var conexao = valkey.connect()) {
-                return conexao.sync().exists("op:100000001:parcelas") == 1;
+                return conexao.sync().exists("custodia-vc:100000001") == 1;
             }
         });
         consultar(segunda, "parcelas,saldo");

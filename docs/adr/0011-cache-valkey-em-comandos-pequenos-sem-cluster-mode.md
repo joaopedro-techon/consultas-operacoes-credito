@@ -1,5 +1,7 @@
 # Cache no Valkey em comandos pequenos, gravação fora da requisição e sem cluster mode
 
+> Parcialmente substituído pelo ADR-0018: as chaves de bloco viraram um hash versionado por operação (`HMGET` na leitura), e a gravação usa um `EVALSHA` de chave única.
+
 O cache por bloco (ADR-0002) lia todas as chaves de uma consulta num único `MGET` e gravava com um único `EVAL` que fazia um `SET` por bloco, sob um timeout de 10 ms. Numa consulta CLIENTE com 500 operações × 8 blocos (4.000 chaves) o comando sempre estourava o timeout, abria o circuito `valkey` para todas as consultas, e o script gigante segurava o Valkey (single-thread) para os demais clientes.
 
 Agora a leitura é feita em `MGET`s de até `consultas.cache.chaves-por-comando` (100) chaves, enviados em pipeline pela conexão compartilhada do Lettuce e esperados juntos pelo timeout de comando. A gravação são `SET ... PX` de uma chave, em rodadas de até 100 em pipeline, e sai **fora da requisição** (virtual thread, no máximo `max-gravacoes-simultaneas` ao mesmo tempo; sem vaga, a gravação é descartada): a resposta não espera o cache. Consultas com mais de `max-chaves-por-consulta` (500) chaves nem leem nem gravam no cache e vão direto ao DynamoDB (`consultas.cache{resultado=ignorado}`): o ganho do cache nelas não paga o risco de comandos lentos. A leitura também é pulada quando resta menos que `prazo-minimo-restante` (20 ms, acima do timeout de comando de 10 ms) do prazo da requisição, assim um timeout do Valkey nunca é encurtado pelo prazo e o circuito só conta lentidão real do Valkey.

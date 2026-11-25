@@ -1,6 +1,6 @@
 package br.com.consultas.operacoescredito.adapters.out.cache;
 
-import br.com.consultas.operacoescredito.domain.Bloco;
+import br.com.consultas.operacoescredito.domain.Custodia;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -52,8 +52,9 @@ class CachePropertiesTest {
     }
 
     @Test
-    void chaveUsaIdDaOperacaoENomeCanonicoDoBloco() {
-        assertThat(new ChaveDeBloco(100000001L, Bloco.CONTROLES_IOF).valor()).isEqualTo("op:100000001:controles_iof");
+    void chaveUsaIdDaOperacaoECodigoDaCustodia() {
+        assertThat(new ChaveDeOperacao(100000001L, Custodia.NSF).valor()).isEqualTo("op:100000001:NSF");
+        assertThat(CacheDeCustodia.chaveVersionada(100000001L)).isEqualTo("custodia-vc:100000001");
     }
 
     static CacheProperties propriedades(Duration ttl) {
