@@ -7,3 +7,6 @@ hs_err_pid*.log
 .claude/worktrees/
 
 __pycache__/
+
+# Arquivos intermediarios da archify (diagramas em docs/arquitetura/)
+.archify/
