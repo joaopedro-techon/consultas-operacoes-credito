@@ -129,6 +129,7 @@ A API deverá consultar os dados no DynamoDB na qual seguem uma estrutura de col
     - O projeto deve ficar atrás de um API Gateway da AWS, no qual o api gateway deve fazer o uso do Usage Plans para controle de rate limit e devolver 429 caso o cliente faça mais chamadas do que o permitido por segundo.
         - Observação: Todos os componentes da aws serão virtualizados com docker + localstack
     - Utilizar obrigatoriamente Clean Architecture ou Hexagonal ou ambos de modo a deixar o projeto organizado.
+    - O response deve ser dinamico, de forma que incluir ou excluir um novo campo nao seja necessario mexer no codigo. Exemplo de resposta Map<String, Object> ou List<Map<String, Object>>
 
 # docker-compose
 
