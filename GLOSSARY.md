@@ -50,6 +50,23 @@ Registro de quanto IOF já foi pago para uma parcela. Uma parcela pode ter um ou
 **Saldo devedor**:
 Valor ainda devido, por parcela e agregado na operação, em uma data de posição.
 
+## Atualização da visão consolidada
+
+**Atualização Online**:
+Gravação na visão consolidada de um evento individual vindo da fonte primária (Kafka, entregue via SQS), em tempo quase real.
+_Avoid_: evento online, carga online
+
+**Atualização Offline**:
+Gravação em massa na visão consolidada feita pela carga periódica (job Glue).
+_Avoid_: carga online, batch (sozinho)
+
+**Carga**:
+Uma execução da Atualização Offline. Um evento da Atualização Online não é uma carga.
+
+**Versão do registro**:
+Instante (`codigo_identificador_carga`) que data o conteúdo de uma operação de crédito em uma custódia. Toda atualização, Online ou Offline, regrava todos os blocos da operação de uma vez com a mesma versão; vence a de versão maior, e versão igual ou menor é descartada inteira. Uma consulta nunca entrega blocos de versões diferentes da mesma operação.
+_Avoid_: timestamp, data de alteração
+
 ## Consulta
 
 **Bloco**:
@@ -84,11 +101,15 @@ _Avoid_: timeout (reservado aos limites de conexão, pool e resposta de uma cham
 Cópia de leitura das operações, otimizada para rapidez e eventualmente consistente com a fonte primária.
 
 **Cache de blocos**:
-Cópia temporária (Valkey, TTL) do `texto_detalhe` de cada bloco de uma operação já lido da visão consolidada, com chave `op:{id_operacao}:{bloco}`. Só otimização: indisponível, a consulta segue no DynamoDB (fail-open). Não guarda a lista de operações de um cliente ou conta e não vale para a fonte primária (ADR-0002).
+Cópia temporária (Valkey, TTL) dos blocos de uma operação em uma custódia já lidos da visão consolidada, todos de uma mesma versão do registro (`op:{id_operacao}:{custodia}`, ADR-0018). Nunca guarda blocos de versões diferentes e nunca troca uma versão por outra menor. Só otimização: indisponível, a consulta segue no DynamoDB (fail-open). Não guarda a lista de operações de um cliente ou conta e não vale para a fonte primária (ADR-0002).
 _Avoid_: cache de consulta, cache de resposta
 
+**Marcador de invalidação**:
+Registro, no cache de blocos, de que a operação foi atualizada para uma versão do registro: tira os blocos antigos de circulação e impede que uma leitura com versão menor os traga de volta (ADR-0018).
+_Avoid_: tombstone, invalidação (sozinho)
+
 **Cache de custódia**:
-Lembrança temporária (Valkey, TTL) de em qual custódia uma operação foi encontrada, usada pelas duas rotas para pular a descoberta de custódia. Guarda só a custódia, nunca dados da operação; se a custódia lembrada não tem mais a operação, a lembrança é descartada e a descoberta é refeita (ADR-0012).
+Lembrança temporária (Valkey, TTL) de em qual custódia uma operação foi encontrada, usada para pular a descoberta de custódia. Guarda só a custódia, nunca dados da operação; se a custódia lembrada não tem mais a operação, a lembrança é descartada e a descoberta é refeita (ADR-0012). A visão consolidada mantém a sua lembrança junto com a versão do registro, e uma lembrança de versão menor nunca substitui uma de versão maior; a lembrança sem versão, compartilhada com a fonte primária, ela só alimenta (ADR-0018).
 
 **Fonte primária**:
 Sistema de origem das operações (mainframe DB2), consultado quando se precisa do dado sem defasagem. Fica aqui só como referência: quem a consulta é outro serviço, em outro repositório (`consultas-operacoes-credito-mainframe`, ADR-0017).

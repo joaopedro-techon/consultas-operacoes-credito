@@ -104,20 +104,22 @@ consultas:
       tentativas-extras: 2
       backoff-base: 10ms
       backoff-maximo: 50ms
-  # Cache por operação e bloco no Valkey (ADR-0002); conexão em spring.data.redis
+  # Cache versionado no Valkey: um hash por operação e custódia, op:{id}:{custodia} (ADR-0002, ADR-0018);
+  # conexão em spring.data.redis. O TTL só é definido quando o hash é criado ou substituído (nunca renovado)
   cache:
     habilitado: ${CONSULTAS_CACHE_HABILITADO:true}
     ttl: ${CONSULTAS_CACHE_TTL:5m}
-    # Leituras e gravações em comandos de até 100 chaves, em pipeline (nenhum comando gigante no Valkey)
+    # Gravações (script de uma chave) em rodadas de até 100 comandos em pipeline
     chaves-por-comando: 100
-    # Consultas com mais chaves (operações × blocos) vão direto ao DynamoDB, sem ler nem gravar no cache
+    # Consultas com mais blocos (operações × blocos) vão direto ao DynamoDB, sem ler nem gravar no cache
     max-chaves-por-consulta: ${CONSULTAS_CACHE_MAX_CHAVES_POR_CONSULTA:500}
     # Sem ao menos isto do prazo da requisição, nem tenta o cache (maior que spring.data.redis.timeout)
     prazo-minimo-restante: 20ms
     # Gravações fora da requisição em andamento; acima disso a gravação é descartada
     max-gravacoes-simultaneas: 32
-    # Cache de custódia (custodia:{id}, ADR-0012): só o endereço da operação, nunca os dados. Chave, valor e TTL
-    # são contrato com o serviço da fonte primária, que usa o mesmo Valkey (ADR-0017): mudam só em conjunto
+    # Cache de custódia (ADR-0012, ADR-0018): só o endereço da operação, nunca os dados. A visão consolidada lê
+    # custodia-vc:{id} (com versão) e continua gravando custodia:{id}, cuja chave, valor e TTL são contrato com o
+    # serviço da fonte primária, que usa o mesmo Valkey (ADR-0017): mudam só em conjunto
     ttl-custodia: ${CONSULTAS_CACHE_TTL_CUSTODIA:24h}
   # Prazo da requisição por tipo de consulta (fail fast → 504, ADR-0006), acima dos P99 alvo de 80 ms e 200 ms
   prazo:

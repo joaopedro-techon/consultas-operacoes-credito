@@ -2,7 +2,7 @@ package br.com.consultas.operacoescredito.adapters.out.dynamodb;
 
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos;
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeCustodia;
-import br.com.consultas.operacoescredito.adapters.out.cache.ChaveDeBloco;
+import br.com.consultas.operacoescredito.adapters.out.cache.ChaveDeOperacao;
 import br.com.consultas.operacoescredito.application.port.out.FalhaNaFonteDeOperacoesException;
 import br.com.consultas.operacoescredito.config.observabilidade.MetricasDeCustodia;
 import br.com.consultas.operacoescredito.domain.Bloco;
@@ -42,9 +42,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.time.Instant;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.zip.GZIPOutputStream;
 
@@ -54,17 +57,124 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * Adapter da visão consolidada contra um DynamoDB em memória que responde, atrasa ou falha como o teste mandar:
  * teto de lotes simultâneos por requisição, falha rápida de um lote qualquer, {@code UnprocessedKeys} esgotadas
- * e itens fora do formato. Sem cache.
+ * e itens fora do formato; e a versão única por operação (ADR-0018): blocos em versões diferentes relidos com
+ * {@code ConsistentRead} e, se seguem divergentes, 503. O cache é um mapa em memória.
  */
 class VisaoConsolidadaDynamoDbAdapterTest {
 
     private static final String CLIENTE = "52998224725";
     private static final byte[] JSON_VAZIO = gzip("{}");
+    private static final String VERSAO = "2026-11-25T10:00:00.000Z";
+    private static final String VERSAO_ANTERIOR = "2026-11-25T09:00:00.000Z";
+    private static final long VERSAO_EPOCH = Instant.parse(VERSAO).toEpochMilli();
 
     private final DynamoDbFalso dynamoDb = new DynamoDbFalso();
     private final CircuitBreaker circuitBreaker = CircuitBreaker.of("dynamodb", circuito());
-    private final CacheDeCustodiaEmMemoria cache = new CacheDeCustodiaEmMemoria();
+    private final CacheEmMemoria cache = new CacheEmMemoria();
     private final SimpleMeterRegistry metricas = new SimpleMeterRegistry();
+
+    @Test
+    void blocosEmVersoesDiferentesSaoRelidosComConsistentRead() {
+        // Leitura eventual atrasada: o saldo ainda na versão anterior; a consistente já vê tudo na nova
+        dynamoDb.versoes((item, consistente) -> !consistente && sk(item).endsWith("#SALDO") ? VERSAO_ANTERIOR : VERSAO);
+        cache.lembrar(1, Custodia.SF);
+        var adapter = adapter(4);
+
+        var operacoes = adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO, Bloco.SALDO));
+
+        assertThat(operacoes).singleElement().satisfies(operacao ->
+                assertThat(operacao.blocos()).containsKeys(Bloco.OPERACAO, Bloco.SALDO));
+        assertThat(dynamoDb.leiturasConsistentes()).containsExactly(false, true);
+        assertThat(cache.gravacoes).singleElement().satisfies(gravacao -> {
+            assertThat(gravacao.versao()).isEqualTo(VERSAO_EPOCH);
+            assertThat(gravacao.blocos()).containsOnlyKeys(Bloco.OPERACAO, Bloco.SALDO);
+        });
+        assertThat(metricas.get(VisaoConsolidadaDynamoDbAdapter.METRICA_VERSAO_DIVERGENTE)
+                .tag("resultado", "relida").counter().count()).isEqualTo(1);
+    }
+
+    @Test
+    void versoesQueSeguemDivergentesDepoisDasReleiturasViram503SemContarNoCircuito() {
+        dynamoDb.versoes((item, consistente) -> sk(item).endsWith("#SALDO") ? VERSAO_ANTERIOR : VERSAO);
+        var adapter = adapter(4);
+
+        assertThatThrownBy(() -> adapter.buscar(new CriterioConsulta.PorOperacao(1),
+                EnumSet.of(Bloco.OPERACAO, Bloco.SALDO)))
+                .isInstanceOf(VersaoDivergenteException.class)
+                .satisfies(e -> assertThat(((VersaoDivergenteException) e).tenteNovamenteEm())
+                        .isEqualTo(Duration.ofSeconds(1)));
+        // Descoberta (eventual) e duas releituras consistentes
+        assertThat(dynamoDb.leiturasConsistentes()).containsExactly(false, true, true);
+        assertThat(cache.gravacoes).isEmpty();
+        assertThat(circuitBreaker.getMetrics().getNumberOfFailedCalls()).isZero();
+    }
+
+    @Test
+    void blocoDoCacheDeVersaoAnteriorAoDoDynamoDbNaoEMisturado() {
+        // O cache tem o operacao da versão anterior; o saldo, lido agora, já está na nova
+        cache.lembrar(1, Custodia.SF);
+        cache.guardar(new ChaveDeOperacao(1, Custodia.SF), Instant.parse(VERSAO_ANTERIOR).toEpochMilli(),
+                Map.of(Bloco.OPERACAO, gzip("{\"versao\":\"anterior\"}")));
+        var adapter = adapter(4);
+
+        var operacoes = adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO, Bloco.SALDO));
+
+        assertThat(operacoes).singleElement().satisfies(operacao ->
+                assertThat(operacao.blocos().get(Bloco.OPERACAO)).isNotEqualTo(Map.of("versao", "anterior")));
+        assertThat(dynamoDb.leiturasConsistentes()).containsExactly(false, true);
+        assertThat(dynamoDb.chavesConsistentes()).containsExactlyInAnyOrder("1|SF#EXPAND#OPERACAO",
+                "1|SF#EXPAND#SALDO");
+    }
+
+    @Test
+    void itensSemVersaoSaoEntreguesMasNaoVaoAoCache() {
+        dynamoDb.versoes((item, consistente) -> null);
+        var adapter = adapter(4);
+
+        var operacoes = adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO, Bloco.SALDO));
+
+        assertThat(operacoes).hasSize(1);
+        assertThat(dynamoDb.leiturasConsistentes()).containsExactly(false);
+        assertThat(cache.gravacoes).isEmpty();
+        assertThat(cache.custodia(1)).isEmpty();
+    }
+
+    @Test
+    void operacaoDoIndiceAtrasadaEmRelacaoATabelaBaseERelidaInteira() {
+        dynamoDb.operacoesNoIndice(2);
+        // O GSI replica depois da tabela base: o bloco operacao da operação 2 ainda está na versão anterior
+        dynamoDb.versoesDoIndice(item ->
+                "2".equals(item.get(VisaoConsolidadaDynamoDbAdapter.PK).n()) ? VERSAO_ANTERIOR : VERSAO);
+        var adapter = adapter(4);
+
+        var operacoes = adapter.buscar(new CriterioConsulta.PorCliente(CLIENTE, OptionalInt.empty()),
+                EnumSet.of(Bloco.OPERACAO, Bloco.PARCELAS));
+
+        assertThat(operacoes).hasSize(2);
+        assertThat(dynamoDb.leiturasConsistentes()).containsExactly(false, true);
+        assertThat(dynamoDb.chavesConsistentes()).as("só a operação divergente, com o bloco operacao")
+                .containsExactlyInAnyOrder("2|SF#EXPAND#OPERACAO", "2|SF#EXPAND#PARCELAS");
+        // Os blocos relidos vão ao cache sem o operacao, que vem do GSI
+        assertThat(cache.gravacoes).allSatisfy(gravacao ->
+                assertThat(gravacao.blocos()).containsOnlyKeys(Bloco.PARCELAS));
+    }
+
+    @Test
+    void clienteUsaDoCacheSoOsBlocosDaVersaoDoIndice() {
+        dynamoDb.operacoesNoIndice(2);
+        cache.guardar(new ChaveDeOperacao(1, Custodia.SF), VERSAO_EPOCH, Map.of(Bloco.PARCELAS, JSON_VAZIO));
+        cache.guardar(new ChaveDeOperacao(2, Custodia.SF), VERSAO_EPOCH - 1, Map.of(Bloco.PARCELAS, JSON_VAZIO));
+        var adapter = adapter(4);
+
+        adapter.buscar(new CriterioConsulta.PorCliente(CLIENTE, OptionalInt.empty()),
+                EnumSet.of(Bloco.OPERACAO, Bloco.PARCELAS));
+
+        assertThat(dynamoDb.chavesLidas()).containsExactly("2|SF#EXPAND#PARCELAS");
+    }
+
+    private static String sk(Map<String, AttributeValue> item) {
+        return item.get(VisaoConsolidadaDynamoDbAdapter.SK).s();
+    }
 
     @Test
     void lotesDeUmaConsultaNaoPassamDoTetoDeLotesSimultaneos() {
@@ -206,13 +316,13 @@ class VisaoConsolidadaDynamoDbAdapterTest {
         // 4 custódias × 2 blocos num só BatchGetItem
         assertThat(dynamoDb.chamadasBatch()).isEqualTo(1);
         assertThat(dynamoDb.custodiasPedidas()).containsExactlyInAnyOrder(Custodia.values());
-        assertThat(cache.buscar(1)).contains(Custodia.NSF);
+        assertThat(cache.custodia(1)).contains(Custodia.NSF);
         assertThat(metricas.get(MetricasDeCustodia.DUPLICADA).counter().count()).isEqualTo(1);
     }
 
     @Test
     void comCustodiaEmCachePedeSoNela() {
-        cache.gravar(1, Custodia.F5);
+        cache.lembrar(1, Custodia.F5);
         dynamoDb.custodiasComItens(Set.of(Custodia.F5));
         var adapter = adapter(4);
 
@@ -225,7 +335,7 @@ class VisaoConsolidadaDynamoDbAdapterTest {
 
     @Test
     void custodiaDoCacheSemAOperacaoRefazADescoberta() {
-        cache.gravar(1, Custodia.F5);
+        cache.lembrar(1, Custodia.F5);
         dynamoDb.custodiasComItens(Set.of(Custodia.OD));
         var adapter = adapter(4);
 
@@ -234,17 +344,17 @@ class VisaoConsolidadaDynamoDbAdapterTest {
         assertThat(operacoes).singleElement().satisfies(operacao ->
                 assertThat(operacao.custodia()).contains(Custodia.OD));
         assertThat(dynamoDb.chamadasBatch()).isEqualTo(2);
-        assertThat(cache.buscar(1)).contains(Custodia.OD);
+        assertThat(cache.custodia(1)).contains(Custodia.OD);
     }
 
     @Test
     void operacaoInexistenteEmTodasAsCustodiasEsqueceACustodiaLembrada() {
-        cache.gravar(1, Custodia.F5);
+        cache.lembrar(1, Custodia.F5);
         dynamoDb.custodiasComItens(Set.of());
         var adapter = adapter(4);
 
         assertThat(adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO))).isEmpty();
-        assertThat(cache.buscar(1)).isEmpty();
+        assertThat(cache.custodia(1)).isEmpty();
         assertThat(cache.remocoes.get()).isEqualTo(1);
     }
 
@@ -310,42 +420,64 @@ class VisaoConsolidadaDynamoDbAdapterTest {
         return saida.toByteArray();
     }
 
-    /** Cache em memória: só as custódias (os blocos nunca estão em cache), para ver o que o adapter lembra. */
-    private static final class CacheDeCustodiaEmMemoria implements CacheDeBlocos, CacheDeCustodia {
+    /**
+     * Cache em memória: as custódias (com versão) e os blocos (com versão, sem aplicar a regra do script) que o
+     * adapter grava, para ver o que ele lembra. Blocos guardados aqui voltam na leitura.
+     */
+    private static final class CacheEmMemoria implements CacheDeBlocos, CacheDeCustodia {
 
-        private final Map<Long, Custodia> custodias = new ConcurrentHashMap<>();
+        private final Map<Long, CustodiaLembrada> custodias = new ConcurrentHashMap<>();
+        private final Map<ChaveDeOperacao, BlocosEmCache> blocos = new ConcurrentHashMap<>();
+        private final List<GravacaoDeBlocos> gravacoes = new CopyOnWriteArrayList<>();
         private final AtomicInteger remocoes = new AtomicInteger();
 
+        void lembrar(long idOperacao, Custodia custodia) {
+            custodias.put(idOperacao, new CustodiaLembrada(custodia, VERSAO_EPOCH));
+        }
+
+        void guardar(ChaveDeOperacao chave, long versao, Map<Bloco, byte[]> blocosDoHash) {
+            blocos.put(chave, new BlocosEmCache(versao, blocosDoHash));
+        }
+
+        Optional<Custodia> custodia(long idOperacao) {
+            return Optional.ofNullable(custodias.get(idOperacao)).map(CustodiaLembrada::custodia);
+        }
+
         @Override
-        public LeituraDoCache buscar(Collection<ChaveDeBloco> chaves, Collection<Long> custodiasDe) {
-            var encontradas = new HashMap<Long, Custodia>();
-            custodiasDe.forEach(id -> {
-                var custodia = custodias.get(id);
-                if (custodia != null) {
-                    encontradas.put(id, custodia);
+        public LeituraDaOperacao buscarOperacao(long idOperacao, Set<Bloco> pedidos) {
+            var lembrada = Optional.ofNullable(custodias.get(idOperacao));
+            var doHash = lembrada.map(custodia -> blocos.get(new ChaveDeOperacao(idOperacao, custodia.custodia())))
+                    .map(hash -> filtrar(hash, pedidos));
+            return new LeituraDaOperacao(lembrada, doHash);
+        }
+
+        @Override
+        public Map<ChaveDeOperacao, BlocosEmCache> buscar(Map<ChaveDeOperacao, Long> versoes, Set<Bloco> pedidos) {
+            var encontrados = new HashMap<ChaveDeOperacao, BlocosEmCache>();
+            versoes.forEach((chave, versao) -> {
+                var hash = blocos.get(chave);
+                if (hash != null && hash.versao() == versao) {
+                    encontrados.put(chave, filtrar(hash, pedidos));
                 }
             });
-            return new LeituraDoCache(Map.of(), encontradas);
+            return encontrados;
+        }
+
+        private static BlocosEmCache filtrar(BlocosEmCache hash, Set<Bloco> pedidos) {
+            var filtrados = new HashMap<Bloco, byte[]>();
+            hash.blocos().forEach((bloco, texto) -> {
+                if (pedidos.contains(bloco)) {
+                    filtrados.put(bloco, texto);
+                }
+            });
+            return new BlocosEmCache(hash.versao(), filtrados);
         }
 
         @Override
-        public void gravar(Map<ChaveDeBloco, byte[]> blocos, Map<Long, Custodia> custodias) {
-            this.custodias.putAll(custodias);
-        }
-
-        @Override
-        public Optional<Custodia> buscar(long idOperacao) {
-            return Optional.ofNullable(custodias.get(idOperacao));
-        }
-
-        @Override
-        public void gravar(long idOperacao, Custodia custodia) {
-            custodias.put(idOperacao, custodia);
-        }
-
-        @Override
-        public void gravarTodas(Map<Long, Custodia> custodias) {
-            this.custodias.putAll(custodias);
+        public void gravar(Collection<GravacaoDeBlocos> blocos, Collection<GravacaoDeCustodia> custodias) {
+            gravacoes.addAll(blocos);
+            custodias.forEach(custodia -> this.custodias.put(custodia.idOperacao(),
+                    new CustodiaLembrada(custodia.custodia(), custodia.versao())));
         }
 
         @Override
@@ -355,13 +487,23 @@ class VisaoConsolidadaDynamoDbAdapterTest {
         }
     }
 
-    /** DynamoDB em memória: todo item pedido existe (com {@code texto_detalhe} = {@code {}}), salvo outra resposta. */
+    /**
+     * DynamoDB em memória: todo item pedido existe (com {@code texto_detalhe} = {@code {}}), salvo outra resposta.
+     * Item sem {@code codigo_identificador_carga} na resposta ganha o de {@link #versoes}, que sabe se a leitura é
+     * consistente ({@code null}: o item fica sem versão).
+     */
     private static final class DynamoDbFalso implements DynamoDbClient {
 
         private volatile Function<QueryRequest, QueryResponse> query = requisicao -> QueryResponse.builder().build();
         private volatile Function<BatchGetItemRequest, BatchGetItemResponse> batch = DynamoDbFalso::tudoEncontrado;
+        private volatile BiFunction<Map<String, AttributeValue>, Boolean, String> versoes = (item, consistente) ->
+                VERSAO;
+        private volatile Function<Map<String, AttributeValue>, String> versoesDoIndice = item -> VERSAO;
         private volatile Duration demoraDoBatch = Duration.ZERO;
         private final Set<Custodia> custodiasPedidas = ConcurrentHashMap.newKeySet();
+        private final List<Boolean> leiturasConsistentes = new CopyOnWriteArrayList<>();
+        private final List<String> chavesLidas = new CopyOnWriteArrayList<>();
+        private final List<String> chavesConsistentes = new CopyOnWriteArrayList<>();
         private final AtomicInteger chamadasBatch = new AtomicInteger();
         private final AtomicInteger emAndamento = new AtomicInteger();
         private final AtomicInteger maximoEmAndamento = new AtomicInteger();
@@ -389,6 +531,47 @@ class VisaoConsolidadaDynamoDbAdapterTest {
 
         void demoraDoBatch(Duration demora) {
             this.demoraDoBatch = demora;
+        }
+
+        void versoes(BiFunction<Map<String, AttributeValue>, Boolean, String> versoes) {
+            this.versoes = versoes;
+        }
+
+        void versoesDoIndice(Function<Map<String, AttributeValue>, String> versoes) {
+            this.versoesDoIndice = versoes;
+        }
+
+        /** {@code ConsistentRead} de cada {@code BatchGetItem}, na ordem. */
+        List<Boolean> leiturasConsistentes() {
+            return leiturasConsistentes;
+        }
+
+        /** Chaves ({@code id|sk}) pedidas nos {@code BatchGetItem}s. */
+        List<String> chavesLidas() {
+            return chavesLidas;
+        }
+
+        /** Chaves ({@code id|sk}) pedidas nos {@code BatchGetItem}s com {@code ConsistentRead}. */
+        List<String> chavesConsistentes() {
+            return chavesConsistentes;
+        }
+
+        private List<Map<String, AttributeValue>> versionar(List<Map<String, AttributeValue>> itens,
+                                                            Function<Map<String, AttributeValue>, String> versoes) {
+            var versionados = new ArrayList<Map<String, AttributeValue>>(itens.size());
+            for (var item : itens) {
+                var versao = item.containsKey(VisaoConsolidadaDynamoDbAdapter.VERSAO)
+                        ? null
+                        : versoes.apply(item);
+                if (versao == null) {
+                    versionados.add(item);
+                } else {
+                    var comVersao = new HashMap<>(item);
+                    comVersao.put(VisaoConsolidadaDynamoDbAdapter.VERSAO, AttributeValue.fromS(versao));
+                    versionados.add(comVersao);
+                }
+            }
+            return versionados;
         }
 
         /** Só as custódias informadas têm itens (todos os blocos pedidos). */
@@ -422,12 +605,24 @@ class VisaoConsolidadaDynamoDbAdapterTest {
 
         @Override
         public QueryResponse query(QueryRequest requisicao) {
-            return query.apply(requisicao);
+            var resposta = query.apply(requisicao);
+            return resposta.toBuilder().items(versionar(resposta.items(), versoesDoIndice)).build();
         }
 
         @Override
         public BatchGetItemResponse batchGetItem(BatchGetItemRequest requisicao) {
             chamadasBatch.incrementAndGet();
+            var consistente = Boolean.TRUE.equals(
+                    requisicao.requestItems().values().iterator().next().consistentRead());
+            leiturasConsistentes.add(consistente);
+            for (var chave : chaves(requisicao)) {
+                var lida = chave.get(VisaoConsolidadaDynamoDbAdapter.PK).n() + "|"
+                        + chave.get(VisaoConsolidadaDynamoDbAdapter.SK).s();
+                chavesLidas.add(lida);
+                if (consistente) {
+                    chavesConsistentes.add(lida);
+                }
+            }
             for (var chave : chaves(requisicao)) {
                 var sk = chave.get(VisaoConsolidadaDynamoDbAdapter.SK).s();
                 Custodia.porCodigo(sk.substring(0, sk.indexOf('#'))).ifPresent(custodiasPedidas::add);
@@ -437,7 +632,11 @@ class VisaoConsolidadaDynamoDbAdapterTest {
                 if (!demoraDoBatch.isZero()) {
                     Thread.sleep(demoraDoBatch);
                 }
-                return batch.apply(requisicao);
+                var resposta = batch.apply(requisicao);
+                var versionadas = new HashMap<String, List<Map<String, AttributeValue>>>();
+                resposta.responses().forEach((tabela, itens) -> versionadas.put(tabela,
+                        versionar(itens, item -> versoes.apply(item, consistente))));
+                return resposta.toBuilder().responses(versionadas).build();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw AbortedException.create("interrompido");

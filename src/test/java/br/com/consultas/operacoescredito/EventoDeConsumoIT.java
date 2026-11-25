@@ -313,10 +313,10 @@ class EventoDeConsumoIT {
                 .header("x-correlationid", primeira)
                 .exchange()
                 .expectStatus().isOk();
-        // A gravação no cache acontece depois da resposta montada; espera o bloco aparecer no Valkey
+        // A gravação no cache acontece depois da resposta montada; espera a custódia (gravada depois dos blocos)
         await().atMost(Duration.ofSeconds(5)).until(() -> {
             try (var conexao = valkey.connect()) {
-                return conexao.sync().exists("op:100000006:parcelas") == 1;
+                return conexao.sync().exists("custodia-vc:100000006") == 1;
             }
         });
         client.get().uri(ROTA + "?id_operacao=100000006&expand=parcelas,saldo")

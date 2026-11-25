@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
@@ -36,42 +37,51 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 /**
- * Cache por bloco no Valkey: chave {@code op:{id_operacao}:{bloco}}, valor = {@code texto_detalhe} GZIP como veio
- * do DynamoDB, com TTL.
+ * Cache versionado no Valkey (ADR-0018):
  * <ul>
- *     <li>Leitura, na requisição: um {@code MGET} por grupo de até {@code chaves-por-comando} chaves, todos em
- *     pipeline e esperados juntos, no máximo pelo timeout de comando ({@code spring.data.redis.timeout}). Não lê
- *     com menos de {@code prazo-minimo-restante} do prazo da requisição, nem com mais de
- *     {@code max-chaves-por-consulta} chaves.</li>
- *     <li>Gravação, fora da requisição (virtual thread, no máximo {@code max-gravacoes-simultaneas}): um
- *     {@code SET ... PX} por bloco, em rodadas de até {@code chaves-por-comando} comandos em pipeline, cada rodada
- *     dentro do timeout de comando. A resposta da consulta não espera a gravação.</li>
+ *     <li>blocos: hash {@code op:{id_operacao}:{custodia}} com {@code versao} (epoch ms), um campo por bloco
+ *     ({@code texto_detalhe} GZIP como veio do DynamoDB) e, se invalidado, {@code marcador}; TTL {@code ttl};</li>
+ *     <li>custódia: hash {@code custodia-vc:{id_operacao}} com {@code custodia}, {@code versao} e, se invalidado,
+ *     {@code marcador}; TTL {@code ttl-custodia}. A chave compartilhada {@code custodia:{id_operacao}} (ADR-0017)
+ *     continua sendo gravada como antes, mas não é lida.</li>
  * </ul>
- * Só comandos de uma chave e {@code MGET} (ADR-0011). Fail-open: toda leitura e cada gravação passam pelo circuit
- * breaker {@value CacheConfig#CIRCUIT_BREAKER}; falha ou circuito aberto viram "nada em cache" e a consulta segue
- * no DynamoDB.
+ * Leitura, na requisição: um {@code HMGET} por hash, todos em pipeline e esperados juntos, no máximo pelo timeout
+ * de comando ({@code spring.data.redis.timeout}). Um {@code HMGET} é atômico, então os blocos lidos de um hash são
+ * sempre da mesma versão. Não lê com menos de {@code prazo-minimo-restante} do prazo da requisição, nem com mais de
+ * {@code max-chaves-por-consulta} blocos (operações × blocos).
  * <p>
- * Cada leitura e gravação é uma observação {@code consultas.dependencia} ({@code dependencia=valkey},
- * {@code operacao=MGET|SET}); cada bloco procurado conta no contador {@code consultas.cache} ({@code bloco},
- * {@code resultado=hit|miss|indisponivel|ignorado}) e na contagem da requisição ({@link CacheDaRequisicao}, que
- * segue no evento de consumo: lá só há hits e misses, e indisponível ou ignorado conta como miss).
+ * Gravação, fora da requisição (virtual thread, no máximo {@code max-gravacoes-simultaneas}): o script
+ * {@link ScriptValkey#GRAVAR_VERSIONADO} por hash, em rodadas de até {@code chaves-por-comando} comandos em pipeline,
+ * cada rodada dentro do timeout de comando. A resposta da consulta não espera a gravação.
+ * <p>
+ * Fail-open: toda leitura e cada gravação passam pelo circuit breaker {@value CacheConfig#CIRCUIT_BREAKER}; falha ou
+ * circuito aberto viram "nada em cache" e a consulta segue no DynamoDB. Cada leitura e gravação é uma observação
+ * {@code consultas.dependencia} ({@code dependencia=valkey}, {@code operacao=HMGET|EVALSHA|DEL}); cada bloco
+ * procurado conta no contador {@code consultas.cache} ({@code bloco},
+ * {@code resultado=hit|miss|indisponivel|ignorado}) e na contagem da requisição ({@link CacheDaRequisicao}).
  */
 class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
 
     static final String DEPENDENCIA = "valkey";
     static final String METRICA_CACHE = "consultas.cache";
+    static final String CAMPO_VERSAO = "versao";
+    static final String CAMPO_MARCADOR = "marcador";
+    static final String CAMPO_CUSTODIA = "custodia";
 
     private static final Logger log = LoggerFactory.getLogger(ValkeyCacheDeBlocos.class);
+    /** Campos do hash de custódia, na ordem do {@code HMGET}. */
+    private static final byte[][] CAMPOS_DA_CUSTODIA = {bytes(CAMPO_CUSTODIA), bytes(CAMPO_VERSAO),
+            bytes(CAMPO_MARCADOR)};
 
     /** Valor da tag {@code resultado} de {@code consultas.cache}. */
     enum Resultado {
-        /** Bloco encontrado no cache. */
+        /** Bloco encontrado no cache, na versão esperada. */
         HIT,
-        /** Bloco procurado e ausente no cache. */
+        /** Bloco procurado e ausente no cache (ou em outra versão, ou com o marcador de invalidação). */
         MISS,
         /** Cache não respondeu: Valkey fora, lento ou circuit breaker aberto. */
         INDISPONIVEL,
-        /** Cache não consultado de propósito: chaves demais na consulta ou pouco prazo restante. */
+        /** Cache não consultado de propósito: blocos demais na consulta ou pouco prazo restante. */
         IGNORADO;
 
         String tag() {
@@ -83,7 +93,8 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
     private final CircuitBreaker circuitBreaker;
     private final ObservationRegistry observationRegistry;
     private final Duration timeoutComando;
-    private final long ttlEmMilissegundos;
+    private final byte[] ttlBlocos;
+    private final byte[] ttlCustodia;
     private final long ttlCustodiaEmMilissegundos;
     private final int chavesPorComando;
     private final int maxChavesPorConsulta;
@@ -99,8 +110,9 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
         this.circuitBreaker = circuitBreaker;
         this.observationRegistry = observationRegistry;
         this.timeoutComando = timeoutComando;
-        this.ttlEmMilissegundos = properties.ttl().toMillis();
+        this.ttlBlocos = bytes(Long.toString(properties.ttl().toMillis()));
         this.ttlCustodiaEmMilissegundos = properties.ttlCustodia().toMillis();
+        this.ttlCustodia = bytes(Long.toString(ttlCustodiaEmMilissegundos));
         this.chavesPorComando = properties.chavesPorComando();
         this.maxChavesPorConsulta = properties.maxChavesPorConsulta();
         this.prazoMinimoRestante = properties.prazoMinimoRestante();
@@ -111,85 +123,110 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
         }
     }
 
+    /** Hash de custódia e os quatro hashes de blocos (um por custódia) num só pipeline. */
     @Override
-    public LeituraDoCache buscar(Collection<ChaveDeBloco> chaves, Collection<Long> custodiasDe) {
-        if (chaves.isEmpty() && custodiasDe.isEmpty()) {
-            return LeituraDoCache.VAZIA;
+    public LeituraDaOperacao buscarOperacao(long idOperacao, Set<Bloco> blocos) {
+        var pedidos = List.copyOf(blocos);
+        if (pedidos.size() > maxChavesPorConsulta || !PrazoDaRequisicao.comporta(prazoMinimoRestante)) {
+            contar(pedidos, Resultado.IGNORADO);
+            return LeituraDaOperacao.VAZIA;
         }
-        var ordenadas = List.copyOf(chaves);
-        var ids = List.copyOf(custodiasDe);
-        if (ordenadas.size() + ids.size() > maxChavesPorConsulta || !PrazoDaRequisicao.comporta(prazoMinimoRestante)) {
-            contar(ordenadas, Resultado.IGNORADO);
-            return LeituraDoCache.VAZIA;
+        var leituras = new ArrayList<LeituraDeHash>(1 + Custodia.values().length);
+        leituras.add(new LeituraDeHash(bytes(CacheDeCustodia.chaveVersionada(idOperacao)), CAMPOS_DA_CUSTODIA));
+        var campos = camposDosBlocos(pedidos);
+        for (var custodia : Custodia.values()) {
+            leituras.add(new LeituraDeHash(new ChaveDeOperacao(idOperacao, custodia).bytes(), campos));
         }
-        var todas = new ArrayList<byte[]>(ordenadas.size() + ids.size());
-        ordenadas.forEach(chave -> todas.add(chave.bytes()));
-        ids.forEach(id -> todas.add(bytes(CacheDeCustodia.chave(id))));
-        var valores = executar("MGET", null, () -> mget(todas));
+        var valores = executar("HMGET", null, () -> hmget(leituras));
         if (valores.isEmpty()) {
-            contar(ordenadas, Resultado.INDISPONIVEL);
-            return LeituraDoCache.VAZIA;
+            contar(pedidos, Resultado.INDISPONIVEL);
+            return LeituraDaOperacao.VAZIA;
         }
-        var encontrados = new HashMap<ChaveDeBloco, byte[]>();
-        for (int i = 0; i < ordenadas.size(); i++) {
-            var chave = ordenadas.get(i);
-            var valor = valores.get().get(i);
-            if (valor != null) {
-                encontrados.put(chave, valor);
-                contar(chave, Resultado.HIT);
-            } else {
-                contar(chave, Resultado.MISS);
+        var lembrada = custodiaLembrada(valores.get().getFirst());
+        if (lembrada.isEmpty()) {
+            contar(pedidos, Resultado.MISS);
+            return LeituraDaOperacao.VAZIA;
+        }
+        var emCache = blocosEmCache(valores.get().get(1 + lembrada.get().custodia().ordinal()), pedidos);
+        contar(pedidos, emCache);
+        return new LeituraDaOperacao(lembrada, emCache);
+    }
+
+    @Override
+    public Map<ChaveDeOperacao, BlocosEmCache> buscar(Map<ChaveDeOperacao, Long> versoes, Set<Bloco> blocos) {
+        if (versoes.isEmpty() || blocos.isEmpty()) {
+            return Map.of();
+        }
+        var pedidos = List.copyOf(blocos);
+        var chaves = List.copyOf(versoes.keySet());
+        if ((long) chaves.size() * pedidos.size() > maxChavesPorConsulta
+                || !PrazoDaRequisicao.comporta(prazoMinimoRestante)) {
+            contar(pedidos, chaves.size(), Resultado.IGNORADO);
+            return Map.of();
+        }
+        var campos = camposDosBlocos(pedidos);
+        var leituras = chaves.stream().map(chave -> new LeituraDeHash(chave.bytes(), campos)).toList();
+        var valores = executar("HMGET", null, () -> hmget(leituras));
+        if (valores.isEmpty()) {
+            contar(pedidos, chaves.size(), Resultado.INDISPONIVEL);
+            return Map.of();
+        }
+        var encontrados = new HashMap<ChaveDeOperacao, BlocosEmCache>();
+        for (int i = 0; i < chaves.size(); i++) {
+            var chave = chaves.get(i);
+            var emCache = blocosEmCache(valores.get().get(i), pedidos)
+                    .filter(blocosDoHash -> blocosDoHash.versao() == versoes.get(chave));
+            contar(pedidos, emCache);
+            emCache.ifPresent(blocosDoHash -> encontrados.put(chave, blocosDoHash));
+        }
+        return encontrados;
+    }
+
+    /**
+     * Agenda a gravação e volta na hora. Descartada (sem erro) com blocos demais, sem vaga de gravação ou com o
+     * circuito aberto.
+     */
+    @Override
+    public void gravar(Collection<GravacaoDeBlocos> blocos, Collection<GravacaoDeCustodia> custodias) {
+        var comandosDeGravacao = new ArrayList<Supplier<CompletableFuture<?>>>();
+        var total = custodias.size();
+        for (var gravacao : blocos) {
+            if (gravacao.blocos().isEmpty()) {
+                continue;
             }
+            total += gravacao.blocos().size();
+            var argumentos = new ArrayList<byte[]>(2 + 2 * gravacao.blocos().size());
+            argumentos.add(bytes(Long.toString(gravacao.versao())));
+            argumentos.add(ttlBlocos);
+            gravacao.blocos().forEach((bloco, textoDetalhe) -> {
+                argumentos.add(bytes(bloco.nome()));
+                argumentos.add(textoDetalhe);
+            });
+            var chave = gravacao.chave().bytes();
+            comandosDeGravacao.add(() -> comandos.executar(ScriptValkey.GRAVAR_VERSIONADO, chave,
+                    argumentos.toArray(byte[][]::new)));
         }
-        var custodias = new HashMap<Long, Custodia>();
-        for (int i = 0; i < ids.size(); i++) {
-            var id = ids.get(i);
-            var valor = valores.get().get(ordenadas.size() + i);
-            if (valor != null) {
-                // Valor fora do formato (outra versão, edição manual) é tratado como ausente
-                Custodia.porCodigo(new String(valor, StandardCharsets.UTF_8))
-                        .ifPresent(custodia -> custodias.put(id, custodia));
-            }
+        for (var custodia : custodias) {
+            var codigo = bytes(custodia.custodia().codigo());
+            var versionada = bytes(CacheDeCustodia.chaveVersionada(custodia.idOperacao()));
+            byte[][] argumentos = {bytes(Long.toString(custodia.versao())), ttlCustodia, bytes(CAMPO_CUSTODIA), codigo};
+            comandosDeGravacao.add(() -> comandos.executar(ScriptValkey.GRAVAR_VERSIONADO, versionada, argumentos));
+            // Contrato com a fonte primária (ADR-0017): só o código, sem versão
+            var compartilhada = bytes(CacheDeCustodia.chave(custodia.idOperacao()));
+            comandosDeGravacao.add(() -> comandos.set(compartilhada, codigo, ttlCustodiaEmMilissegundos));
         }
-        return new LeituraDoCache(encontrados, custodias);
-    }
-
-    @Override
-    public Optional<Custodia> buscar(long idOperacao) {
-        return Optional.ofNullable(buscar(List.of(), List.of(idOperacao)).custodias().get(idOperacao));
-    }
-
-    @Override
-    public void gravar(long idOperacao, Custodia custodia) {
-        gravar(Map.of(), Map.of(idOperacao, custodia));
-    }
-
-    @Override
-    public void gravarTodas(Map<Long, Custodia> custodias) {
-        gravar(Map.of(), custodias);
+        if (total == 0 || total > maxChavesPorConsulta) {
+            return;
+        }
+        agendar("EVALSHA", total, () -> emRodadas(comandosDeGravacao));
     }
 
     @Override
     public void remover(long idOperacao) {
-        var chave = bytes(CacheDeCustodia.chave(idOperacao));
-        agendar("DEL", 1, () -> aguardar(List.of(comandos.del(chave)), timeoutComando));
-    }
-
-    /**
-     * Agenda a gravação e volta na hora. Descartada (sem erro) com chaves demais, sem vaga de gravação ou com o
-     * circuito aberto.
-     */
-    @Override
-    public void gravar(Map<ChaveDeBloco, byte[]> blocos, Map<Long, Custodia> custodias) {
-        var total = blocos.size() + custodias.size();
-        if (total == 0 || total > maxChavesPorConsulta) {
-            return;
-        }
-        var valores = new ArrayList<Gravacao>(total);
-        blocos.forEach((chave, valor) -> valores.add(new Gravacao(chave.bytes(), valor, ttlEmMilissegundos)));
-        custodias.forEach((id, custodia) -> valores.add(new Gravacao(bytes(CacheDeCustodia.chave(id)),
-                bytes(custodia.codigo()), ttlCustodiaEmMilissegundos)));
-        agendar("SET", total, () -> set(valores));
+        var versionada = bytes(CacheDeCustodia.chaveVersionada(idOperacao));
+        var compartilhada = bytes(CacheDeCustodia.chave(idOperacao));
+        agendar("DEL", 2, () -> aguardar(List.of(comandos.del(versionada), comandos.del(compartilhada)),
+                timeoutComando));
     }
 
     /** Executa {@code comando} fora da requisição, se houver vaga de gravação; senão descarta. */
@@ -215,39 +252,91 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
         }
     }
 
+    /** Custódia do hash {@code custodia-vc}; sem lembrança, com marcador ou fora do formato: vazia. */
+    private static Optional<CustodiaLembrada> custodiaLembrada(List<byte[]> valores) {
+        var custodia = valores.get(0);
+        var versao = versao(valores.get(1));
+        if (custodia == null || versao.isEmpty() || valores.get(2) != null) {
+            return Optional.empty();
+        }
+        return Custodia.porCodigo(new String(custodia, StandardCharsets.UTF_8))
+                .map(encontrada -> new CustodiaLembrada(encontrada, versao.get()));
+    }
+
+    /**
+     * Blocos do hash de uma operação: os dois primeiros valores são {@code versao} e {@code marcador}, depois um por
+     * bloco pedido. Hash inexistente, com marcador ou com versão fora do formato: vazio.
+     */
+    private static Optional<BlocosEmCache> blocosEmCache(List<byte[]> valores, List<Bloco> pedidos) {
+        var versao = versao(valores.get(0));
+        if (versao.isEmpty() || valores.get(1) != null) {
+            return Optional.empty();
+        }
+        var blocos = new EnumMap<Bloco, byte[]>(Bloco.class);
+        for (int i = 0; i < pedidos.size(); i++) {
+            var valor = valores.get(2 + i);
+            if (valor != null) {
+                blocos.put(pedidos.get(i), valor);
+            }
+        }
+        return Optional.of(new BlocosEmCache(versao.get(), blocos));
+    }
+
+    private static Optional<Long> versao(byte[] valor) {
+        if (valor == null) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(Long.parseLong(new String(valor, StandardCharsets.UTF_8)));
+        } catch (NumberFormatException e) {
+            return Optional.empty();
+        }
+    }
+
+    private static byte[][] camposDosBlocos(List<Bloco> pedidos) {
+        var campos = new byte[2 + pedidos.size()][];
+        campos[0] = bytes(CAMPO_VERSAO);
+        campos[1] = bytes(CAMPO_MARCADOR);
+        for (int i = 0; i < pedidos.size(); i++) {
+            campos[2 + i] = bytes(pedidos.get(i).nome());
+        }
+        return campos;
+    }
+
     private static byte[] bytes(String texto) {
         return texto.getBytes(StandardCharsets.UTF_8);
     }
 
-    /** Um {@code SET chave valor PX ttl}. */
-    private record Gravacao(byte[] chave, byte[] valor, long ttlMilissegundos) {
+    /** Um {@code HMGET} de um hash. */
+    private record LeituraDeHash(byte[] chave, byte[][] campos) {
     }
 
-    /** {@code MGET}s de até {@code chaves-por-comando} chaves em pipeline, esperados juntos. */
-    private List<byte[]> mget(List<byte[]> chaves) {
-        var futuros = new ArrayList<CompletableFuture<List<byte[]>>>();
-        for (int inicio = 0; inicio < chaves.size(); inicio += chavesPorComando) {
-            var grupo = chaves.subList(inicio, Math.min(inicio + chavesPorComando, chaves.size()));
-            futuros.add(comandos.mget(grupo.toArray(byte[][]::new)));
+    /** Todos os {@code HMGET}s em pipeline, esperados juntos; uma lista de valores por hash, na ordem pedida. */
+    private List<List<byte[]>> hmget(List<LeituraDeHash> leituras) {
+        var futuros = new ArrayList<CompletableFuture<List<byte[]>>>(leituras.size());
+        for (var leitura : leituras) {
+            futuros.add(comandos.hmget(leitura.chave(), leitura.campos()));
         }
         aguardar(futuros, PrazoDaRequisicao.limitar(timeoutComando));
-        var valores = new ArrayList<byte[]>(chaves.size());
-        for (var futuro : futuros) {
-            valores.addAll(futuro.join());
-        }
-        if (valores.size() != chaves.size()) {
-            throw new IllegalStateException("MGET devolveu " + valores.size() + " valores para " + chaves.size()
-                    + " chaves");
+        var valores = new ArrayList<List<byte[]>>(leituras.size());
+        for (int i = 0; i < futuros.size(); i++) {
+            var doHash = futuros.get(i).join();
+            if (doHash.size() != leituras.get(i).campos().length) {
+                throw new IllegalStateException("HMGET devolveu " + doHash.size() + " valores para "
+                        + leituras.get(i).campos().length + " campos");
+            }
+            valores.add(doHash);
         }
         return valores;
     }
 
-    /** {@code SET ... PX} em rodadas de até {@code chaves-por-comando} comandos em pipeline. */
-    private void set(List<Gravacao> gravacoes) {
-        for (int inicio = 0; inicio < gravacoes.size(); inicio += chavesPorComando) {
+    /** Comandos em rodadas de até {@code chaves-por-comando} em pipeline, cada rodada no timeout de comando. */
+    private void emRodadas(List<Supplier<CompletableFuture<?>>> comandosDeGravacao) {
+        for (int inicio = 0; inicio < comandosDeGravacao.size(); inicio += chavesPorComando) {
             var futuros = new ArrayList<CompletableFuture<?>>();
-            for (var gravacao : gravacoes.subList(inicio, Math.min(inicio + chavesPorComando, gravacoes.size()))) {
-                futuros.add(comandos.set(gravacao.chave(), gravacao.valor(), gravacao.ttlMilissegundos()));
+            for (var comando : comandosDeGravacao.subList(inicio,
+                    Math.min(inicio + chavesPorComando, comandosDeGravacao.size()))) {
+                futuros.add(comando.get());
             }
             aguardar(futuros, timeoutComando);
         }
@@ -288,16 +377,30 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
         }
     }
 
-    private void contar(List<ChaveDeBloco> chaves, Resultado resultado) {
-        chaves.forEach(chave -> contar(chave, resultado));
+    /** Hit para cada bloco pedido presente no hash; miss para os demais (ou todos, sem hash válido). */
+    private void contar(List<Bloco> pedidos, Optional<BlocosEmCache> emCache) {
+        for (var bloco : pedidos) {
+            var hit = emCache.map(blocosDoHash -> blocosDoHash.blocos().containsKey(bloco)).orElse(false);
+            contar(bloco, hit ? Resultado.HIT : Resultado.MISS);
+        }
     }
 
-    private void contar(ChaveDeBloco chave, Resultado resultado) {
-        contadores.get(resultado).get(chave.bloco()).increment();
+    private void contar(List<Bloco> pedidos, Resultado resultado) {
+        contar(pedidos, 1, resultado);
+    }
+
+    private void contar(List<Bloco> pedidos, int operacoes, Resultado resultado) {
+        for (int i = 0; i < operacoes; i++) {
+            pedidos.forEach(bloco -> contar(bloco, resultado));
+        }
+    }
+
+    private void contar(Bloco bloco, Resultado resultado) {
+        contadores.get(resultado).get(bloco).increment();
         if (resultado == Resultado.HIT) {
-            CacheDaRequisicao.hit(chave.bloco().nome());
+            CacheDaRequisicao.hit(bloco.nome());
         } else {
-            CacheDaRequisicao.miss(chave.bloco().nome());
+            CacheDaRequisicao.miss(bloco.nome());
         }
     }
 

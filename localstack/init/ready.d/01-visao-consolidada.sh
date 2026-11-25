@@ -51,7 +51,10 @@ dynamodb = boto3.client("dynamodb", endpoint_url="http://localhost:4566",
                         region_name=os.environ["AWS_DEFAULT_REGION"],
                         aws_access_key_id="test", aws_secret_access_key="test")
 tabela = os.environ["TABELA"]
-agora = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+instante = datetime.datetime.now(datetime.timezone.utc)
+agora = instante.strftime("%Y-%m-%dT%H:%M:%S")
+# Versao do registro (ADR-0018): todos os blocos de uma operacao numa custodia gravados com a mesma
+versao = instante.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 for diretorio in sorted(p for p in pathlib.Path(os.environ["MASSA_DIR"]).iterdir() if p.is_dir()):
     numero_operacao = diretorio.name
@@ -69,6 +72,7 @@ for diretorio in sorted(p for p in pathlib.Path(os.environ["MASSA_DIR"]).iterdir
                 "custodia_expand": {"S": f"{custodia}#EXPAND#{bloco}"},
                 "codigo_expand": {"N": str(CODIGO_EXPAND[bloco])},
                 "texto_detalhe": {"B": gzip.compress(minificado, mtime=0)},
+                "codigo_identificador_carga": {"S": versao},
                 "data_insercao": {"S": agora},
                 "data_alteracao": {"S": agora},
             }

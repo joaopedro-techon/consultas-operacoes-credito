@@ -1,57 +1,86 @@
 package br.com.consultas.operacoescredito.adapters.out.cache;
 
+import br.com.consultas.operacoescredito.domain.Bloco;
 import br.com.consultas.operacoescredito.domain.Custodia;
 
 import java.util.Collection;
-import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 
 /**
- * Cache por operação e bloco da visão consolidada (ADR-0002).
- * O valor é o {@code texto_detalhe} (JSON em GZIP) exatamente como veio do DynamoDB. Na mesma leitura (um só
- * {@code MGET}) vêm também as custódias das operações (cache de custódia, ADR-0012), sem ida extra ao Valkey.
+ * Cache versionado da visão consolidada (ADR-0018): um hash por operação e custódia com os blocos de uma única
+ * versão do registro, e a custódia lembrada de cada operação, também com versão. Os blocos são o
+ * {@code texto_detalhe} (JSON em GZIP) exatamente como veio do DynamoDB.
  * <p>
- * É só uma otimização (fail-open): nenhum método lança exceção por falha do cache; falha, lentidão ou
+ * Uma gravação nunca troca a versão do cache por uma menor, e um hash com o marcador de invalidação conta como
+ * ausente. É só uma otimização (fail-open): nenhum método lança exceção por falha do cache; falha, lentidão ou
  * circuit breaker aberto equivalem a "nada em cache" na leitura e a "nada gravado" na escrita.
  */
 public interface CacheDeBlocos {
 
     /**
-     * Uma leitura de todas as chaves de bloco e das custódias pedidas (dividida em {@code MGET}s menores em
-     * pipeline).
-     *
-     * @param custodiasDe operações cuja custódia também deve ser lida
+     * Consulta OPERACAO, numa só ida ao Valkey: a custódia lembrada da operação e os blocos pedidos que o cache
+     * tem nela.
      */
-    LeituraDoCache buscar(Collection<ChaveDeBloco> chaves, Collection<Long> custodiasDe);
-
-    /** Só blocos, sem custódias. */
-    default Map<ChaveDeBloco, byte[]> buscar(Collection<ChaveDeBloco> chaves) {
-        return buscar(chaves, List.of()).blocos();
-    }
+    LeituraDaOperacao buscarOperacao(long idOperacao, Set<Bloco> blocos);
 
     /**
-     * Grava os blocos (TTL do cache de blocos) e as custódias (TTL do cache de custódia), em best-effort: pode
-     * voltar antes de a gravação terminar.
+     * Consultas CLIENTE e CONTA, de operações com custódia e versão já conhecidas (do GSI): os blocos pedidos que o
+     * cache tem <b>nessa versão</b>. Operação cujo cache tem outra versão (ou o marcador) não aparece.
      */
-    void gravar(Map<ChaveDeBloco, byte[]> blocos, Map<Long, Custodia> custodias);
+    Map<ChaveDeOperacao, BlocosEmCache> buscar(Map<ChaveDeOperacao, Long> versoes, Set<Bloco> blocos);
 
-    default void gravar(Map<ChaveDeBloco, byte[]> blocos) {
-        gravar(blocos, Map.of());
-    }
+    /** Grava blocos e custódias com a regra de versão, em best-effort: pode voltar antes de a gravação terminar. */
+    void gravar(Collection<GravacaoDeBlocos> blocos, Collection<GravacaoDeCustodia> custodias);
 
     /**
-     * O que a leitura encontrou.
+     * Blocos de uma operação em cache, todos da mesma versão.
      *
-     * @param blocos    {@code texto_detalhe} dos blocos em cache; chaves ausentes não aparecem
-     * @param custodias custódia de cada operação encontrada no cache de custódia
+     * @param versao versão do registro, em epoch ms
+     * @param blocos {@code texto_detalhe} dos blocos pedidos que estavam no hash; os ausentes não aparecem
      */
-    record LeituraDoCache(Map<ChaveDeBloco, byte[]> blocos, Map<Long, Custodia> custodias) {
+    record BlocosEmCache(long versao, Map<Bloco, byte[]> blocos) {
 
-        public static final LeituraDoCache VAZIA = new LeituraDoCache(Map.of(), Map.of());
-
-        public LeituraDoCache {
+        public BlocosEmCache {
             blocos = Map.copyOf(blocos);
-            custodias = Map.copyOf(custodias);
+        }
+    }
+
+    /** Custódia lembrada de uma operação e a versão do registro em que ela foi vista. */
+    record CustodiaLembrada(Custodia custodia, long versao) {
+
+        public CustodiaLembrada {
+            Objects.requireNonNull(custodia, "custodia");
+        }
+    }
+
+    /**
+     * O que a leitura da consulta OPERACAO encontrou.
+     *
+     * @param custodia custódia lembrada; vazia sem lembrança, com o marcador de invalidação ou com o cache fora
+     * @param blocos   blocos da custódia lembrada; vazio se o hash não existe ou tem o marcador
+     */
+    record LeituraDaOperacao(Optional<CustodiaLembrada> custodia, Optional<BlocosEmCache> blocos) {
+
+        public static final LeituraDaOperacao VAZIA = new LeituraDaOperacao(Optional.empty(), Optional.empty());
+    }
+
+    /** Blocos lidos do DynamoDB numa versão do registro (epoch ms), para o hash da operação na custódia. */
+    record GravacaoDeBlocos(ChaveDeOperacao chave, long versao, Map<Bloco, byte[]> blocos) {
+
+        public GravacaoDeBlocos {
+            Objects.requireNonNull(chave, "chave");
+            blocos = Map.copyOf(blocos);
+        }
+    }
+
+    /** Custódia vencedora de uma operação, na versão do registro (epoch ms) do seu bloco {@code operacao}. */
+    record GravacaoDeCustodia(long idOperacao, Custodia custodia, long versao) {
+
+        public GravacaoDeCustodia {
+            Objects.requireNonNull(custodia, "custodia");
         }
     }
 }

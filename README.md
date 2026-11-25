@@ -135,24 +135,35 @@ Logs WARN (logger `resiliencia`) de todas as instâncias (DynamoDB, Valkey e SQS
 breaker, com as taxas de falha e de lentidão e os limiares; recusas (circuito aberto, bulkhead cheio, rate limiter
 sem permissão) amostradas a uma linha por instância a cada 5 s, com quantas foram suprimidas.
 
-## Cache por bloco (Valkey)
+## Cache versionado (Valkey)
 
-Cache dos dados (blocos) da visão consolidada (ADR-0002). O **cache de custódia** `custodia:{id_operacao}` (só o
-endereço da operação, TTL `consultas.cache.ttl-custodia`, 24 h, ADR-0012) é compartilhado com o serviço da fonte
-primária, no mesmo Valkey: chave, valor e TTL são contrato entre os dois repositórios e só mudam em conjunto
-(ADR-0017). Aqui ele vem no mesmo `MGET` dos blocos.
+Cache dos dados (blocos) da visão consolidada (ADR-0002), **versionado** (ADR-0018): uma consulta nunca entrega
+blocos de versões do registro (`codigo_identificador_carga`) diferentes da mesma operação, e uma leitura atrasada
+nunca regrava no cache um dado mais antigo do que o que ele já conhece.
 
-- Chave `op:{id_operacao}:{bloco}` (nome canônico do bloco); valor = `texto_detalhe` em GZIP exatamente como veio
-  do DynamoDB (sem recomprimir); TTL `consultas.cache.ttl` (default 5 min).
-- Por requisição, uma leitura de todas as chaves operação × bloco a ler da tabela base, em `MGET`s de até
-  `consultas.cache.chaves-por-comando` (100) chaves em pipeline; só os ausentes vão ao `BatchGetItem`, e os lidos
-  são gravados **fora da requisição** (virtual thread, `SET ... PX` de uma chave em rodadas de 100 em pipeline, no
-  máximo `max-gravacoes-simultaneas` = 32 gravações em andamento; sem vaga, descartada). Ex.: depois de
-  `expand=parcelas,amortizacoes`, uma chamada `expand=parcelas,saldo` só lê `saldo` no DynamoDB (ADR-0011).
-- Consulta com mais de `consultas.cache.max-chaves-por-consulta` (500) chaves, ou com menos de
+- Hash `op:{id_operacao}:{custodia}`: campo `versao` (epoch ms), um campo por bloco (nome canônico; valor =
+  `texto_detalhe` em GZIP exatamente como veio do DynamoDB) e, quando invalidado, `marcador`. TTL
+  `consultas.cache.ttl` (default 5 min), definido só quando o hash é criado ou substituído, nunca renovado.
+- **Cache de custódia**: hash `custodia-vc:{id_operacao}` (`custodia`, `versao`, `marcador`; TTL
+  `consultas.cache.ttl-custodia`, 24 h, ADR-0012), o único que esta API lê. A chave `custodia:{id_operacao}` (só o
+  código) continua sendo gravada: é contrato com o serviço da fonte primária, no mesmo Valkey, e só muda em
+  conjunto (ADR-0017).
+- Leitura: um `HMGET` por hash, todos em pipeline (na consulta OPERACAO, a custódia e as quatro custódias numa ida
+  só). Hash com `marcador`, ou de outra versão que a do GSI (CLIENTE/CONTA), conta como ausente. Só os blocos
+  ausentes vão ao `BatchGetItem`; se os lidos vierem noutra versão, a operação é relida inteira com
+  `ConsistentRead` (até 2 vezes) e, se continuar divergente, a resposta é 503 (`consultas.versao_divergente`).
+- Gravação **fora da requisição** (virtual thread, no máximo `max-gravacoes-simultaneas` = 32 em andamento; sem
+  vaga, descartada) pelo script Lua de uma chave `ScriptValkey.GRAVAR_VERSIONADO`: versão ausente ou menor
+  substitui o hash; igual completa os blocos (ex.: depois de `expand=parcelas,amortizacoes`, uma chamada
+  `expand=parcelas,saldo` só lê `saldo` no DynamoDB); maior rejeita. Item sem versão (ou fora do formato ISO) é
+  entregue, mas não vai ao cache.
+- Invalidação: o invalidador (Lambda no DynamoDB Streams, outro repositório) grava `versao=V` e `marcador=1` no
+  hash, apagando os blocos; só uma leitura com versão ≥ V volta a preenchê-lo.
+- Consulta com mais de `consultas.cache.max-chaves-por-consulta` (500) blocos (operações × blocos), ou com menos de
   `prazo-minimo-restante` (20 ms) do prazo da requisição, nem lê nem grava no cache (`resultado=ignorado`).
-- Premissa: Valkey standalone ou replication group, sem cluster mode. Só comandos de uma chave e `MGET` (que o
-  cliente de cluster do Lettuce divide por slot); nenhum script ou transação multi-chave (ADR-0011).
+- Só comandos de uma chave, inclusive o script: funciona com ou sem cluster mode. Valkey com
+  `maxmemory-policy allkeys-lru` e alarme em `evicted_keys > 0` (nunca `volatile-ttl`, que despejaria primeiro os
+  marcadores).
 - Vale para `OPERACAO`, `CLIENTE` e `CONTA`. A `Query` no GSI (a lista de operações do cliente/conta, que já traz o
   bloco `operacao`) **não** é cacheada: operação nova aparece na hora. Bloco indisponível não é cacheado.
 - Fail-open: o Valkey é só otimização. Timeout curto do cliente (`spring.data.redis.timeout`, 10 ms; conexão em
@@ -285,8 +296,8 @@ trocar para Datadog é trocar o exporter em `observabilidade/otel-collector.yaml
 | --- | --- |
 | `http.server.requests` (timer) | `consumidor`, `tipo_consulta` (`nenhum`/`invalido` quando ausente/inválido), `rota`, `status`, `uri` (template), `method`, `outcome`, `exception` |
 | `consultas.blocos` (contador, um incremento por bloco pedido) | `bloco`, `consumidor`, `tipo_consulta`, `rota`, `status` |
-| `consultas.dependencia` (timer, um por chamada externa) | `dependencia` (`dynamodb`, `valkey`, `sqs`), `operacao` (`BatchGetItem`, `Query`... no DynamoDB; `MGET`/`SET` no Valkey; `SendMessageBatch` no SQS), `indice` (GSI ou `nenhum`, só DynamoDB) |
-| `consultas.cache` (contador, um incremento por bloco procurado no cache) | `bloco`, `resultado` (`hit`, `miss`; `indisponivel` com o Valkey fora, lento ou o circuito aberto; `ignorado` quando a consulta pula o cache por ter chaves demais ou pouco prazo). Taxa de acerto = `hit / (hit + miss)`; o evento de consumo continua só com hits e misses |
+| `consultas.dependencia` (timer, um por chamada externa) | `dependencia` (`dynamodb`, `valkey`, `sqs`), `operacao` (`BatchGetItem`, `Query`... no DynamoDB; `HMGET`/`EVALSHA`/`DEL` no Valkey; `SendMessageBatch` no SQS), `indice` (GSI ou `nenhum`, só DynamoDB) |
+| `consultas.cache` (contador, um incremento por bloco procurado no cache) | `bloco`, `resultado` (`hit`, `miss`; `indisponivel` com o Valkey fora, lento ou o circuito aberto; `ignorado` quando a consulta pula o cache por ter blocos demais ou pouco prazo). Taxa de acerto = `hit / (hit + miss)`; o evento de consumo continua só com hits e misses |
 | `resilience4j.circuitbreaker.*` (estado, chamadas) | `name` (`valkey`, `dynamodb`, `sqs`), `state`/`kind` |
 | `resilience4j.bulkhead.*`, `resilience4j.ratelimiter.*` | `name` (`dynamodb`, `dynamodb-cliente-conta`; bulkhead também `sqs`) |
 | `eventos.consumo.enviados` (contador; Prometheus `eventos_consumo_enviados_total`) | — |
@@ -299,8 +310,8 @@ trocar para Datadog é trocar o exporter em `observabilidade/otel-collector.yaml
 - Spans: um por requisição HTTP (com `consumidor`, `tipo_consulta`, `rota`, `correlation_id` e os
   identificadores da consulta), com filhos por etapa e por chamada externa. `traceparent` (W3C) recebido
   continua o trace.
-  - OPERACAO na visão consolidada: `valkey MGET`, `dynamodb BatchGetItem` (só com blocos fora do cache) e
-    `valkey SET` filho do span HTTP, mas fora da requisição (pode terminar depois da resposta).
+  - OPERACAO na visão consolidada: `valkey HMGET`, `dynamodb BatchGetItem` (só com blocos fora do cache) e
+    `valkey EVALSHA` filho do span HTTP, mas fora da requisição (pode terminar depois da resposta).
   - CLIENTE/CONTA: `consulta_gsi` (com os `dynamodb Query`) e `batch` (com os `dynamodb BatchGetItem` dos lotes).
   - `filtro`, quando há `filter`.
 - Novos adapters (Valkey, SQS) e etapas usam `Observacoes.dependencia(...)` e `Observacoes.etapa(...)`
@@ -329,7 +340,7 @@ O `docker-compose.yml` sobe:
 
 - **LocalStack Community `4.14.0`**, a última tag que roda sem auth token (ADR-0003). Uso exclusivo em
   desenvolvimento local: a tag não recebe patches de segurança. Serviços `dynamodb` e `sqs`.
-- **Valkey `9.0.8-alpine`** (porta 6379), cache por bloco, sem persistência.
+- **Valkey `9.0.8-alpine`** (porta 6379), cache versionado, sem persistência.
 - **app**, construída pelo `Dockerfile`.
 - **OpenTelemetry Collector** `otel/opentelemetry-collector-contrib:0.165.0` (OTLP em `4317`/`4318`).
 - **Jaeger v2** `jaegertracing/jaeger:2.23.0`: traces em http://localhost:16686.
@@ -357,7 +368,8 @@ Para ver a tabela no **NoSQL Workbench**: *Operation builder* → *Add connectio
 
 Para ver o **cache no Valkey**: **RedisInsight** `redis/redisinsight:3.8.0` em http://localhost:5540. No primeiro
 acesso, aceite os termos; a conexão *valkey (cache local)* aparece pré-configurada, com descompressão GZIP, então
-cada chave `op:{id_operacao}:{bloco}` mostra o JSON do bloco (escolha o formatador *JSON*) e o TTL restante.
+cada campo de bloco do hash `op:{id_operacao}:{custodia}` mostra o JSON do bloco (escolha o formatador *JSON*), ao
+lado de `versao` e do TTL restante.
 
 A massa é gerada por `localstack/gerar_massa.py` a partir de uma especificação curta por operação, para que
 os blocos fechem entre si (regras no cabeçalho do script: amortizações aplicadas juros antes do principal,

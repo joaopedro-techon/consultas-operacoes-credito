@@ -11,15 +11,15 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 
-import br.com.consultas.operacoescredito.domain.Custodia;
+import br.com.consultas.operacoescredito.domain.Bloco;
 
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Map;
-import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Executors;
 
-/** Cache por bloco da visão consolidada: Valkey ou, com {@code consultas.cache.habilitado=false}, desligado. */
+/** Cache versionado da visão consolidada: Valkey ou, com {@code consultas.cache.habilitado=false}, desligado. */
 @Configuration(proxyBeanMethods = false)
 class CacheConfig {
 
@@ -61,27 +61,17 @@ class CacheConfig {
     static final class CacheDesligado implements CacheDeBlocosECustodia {
 
         @Override
-        public LeituraDoCache buscar(Collection<ChaveDeBloco> chaves, Collection<Long> custodiasDe) {
-            return LeituraDoCache.VAZIA;
+        public LeituraDaOperacao buscarOperacao(long idOperacao, Set<Bloco> blocos) {
+            return LeituraDaOperacao.VAZIA;
         }
 
         @Override
-        public void gravar(Map<ChaveDeBloco, byte[]> blocos, Map<Long, Custodia> custodias) {
-            // desligado
+        public Map<ChaveDeOperacao, BlocosEmCache> buscar(Map<ChaveDeOperacao, Long> versoes, Set<Bloco> blocos) {
+            return Map.of();
         }
 
         @Override
-        public Optional<Custodia> buscar(long idOperacao) {
-            return Optional.empty();
-        }
-
-        @Override
-        public void gravar(long idOperacao, Custodia custodia) {
-            // desligado
-        }
-
-        @Override
-        public void gravarTodas(Map<Long, Custodia> custodias) {
+        public void gravar(Collection<GravacaoDeBlocos> blocos, Collection<GravacaoDeCustodia> custodias) {
             // desligado
         }
 
