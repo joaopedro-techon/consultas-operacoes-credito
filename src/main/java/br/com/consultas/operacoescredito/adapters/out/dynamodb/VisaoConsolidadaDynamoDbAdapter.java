@@ -234,38 +234,6 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
         return Optional.of(itens);
     }
 
-    private List<OperacaoConsultada> descobrir(long idOperacao, Set<Bloco> blocos, boolean haviaLembrada) {
-        var porCustodia = lerEmTodasAsCustodias(idOperacao, blocos);
-        var encontradas = EnumSet.noneOf(Custodia.class);
-        for (var custodia : Custodia.values()) {
-            var achou = porCustodia.getOrDefault(custodia, Map.of()).containsKey(Bloco.OPERACAO);
-            if (achou) {
-                encontradas.add(custodia);
-            }
-            metricas.contar(custodia, achou
-                    ? MetricasDeCustodia.Resultado.ENCONTRADA
-                    : MetricasDeCustodia.Resultado.NAO_ENCONTRADA);
-        }
-        var vencedora = precedencia.vencedora(encontradas);
-        if (vencedora.isEmpty()) {
-            if (haviaLembrada) {
-                cacheDeCustodia.remover(idOperacao);
-            }
-            return List.of();
-        }
-        if (encontradas.size() > 1) {
-            metricas.duplicada(idOperacao, encontradas, vencedora.get());
-        }
-        var itens = porCustodia.get(vencedora.get());
-        if (divergem(itens)) {
-            itens = releituraConsistente(idOperacao, vencedora.get(), blocos).orElseThrow(() ->
-                    divergente("A operação " + idOperacao + " sumiu da custódia " + vencedora.get().codigo()
-                            + " na releitura consistente"));
-        }
-        gravarNoCache(idOperacao, vencedora.get(), itens, itens);
-        return List.of(montar(vencedora.get(), blocos, itens));
-    }
-
     /**
      * Os blocos pedidos da operação em todas as custódias, numa {@code Query} pela PK (ADR-0020).
      * <p>
@@ -317,6 +285,38 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
             inicio = proximaPagina(resposta);
         } while (inicio != null);
         return porCustodia;
+    }
+
+    private List<OperacaoConsultada> descobrir(long idOperacao, Set<Bloco> blocos, boolean haviaLembrada) {
+        var porCustodia = lerEmTodasAsCustodias(idOperacao, blocos);
+        var encontradas = EnumSet.noneOf(Custodia.class);
+        for (var custodia : Custodia.values()) {
+            var achou = porCustodia.getOrDefault(custodia, Map.of()).containsKey(Bloco.OPERACAO);
+            if (achou) {
+                encontradas.add(custodia);
+            }
+            metricas.contar(custodia, achou
+                    ? MetricasDeCustodia.Resultado.ENCONTRADA
+                    : MetricasDeCustodia.Resultado.NAO_ENCONTRADA);
+        }
+        var vencedora = precedencia.vencedora(encontradas);
+        if (vencedora.isEmpty()) {
+            if (haviaLembrada) {
+                cacheDeCustodia.remover(idOperacao);
+            }
+            return List.of();
+        }
+        if (encontradas.size() > 1) {
+            metricas.duplicada(idOperacao, encontradas, vencedora.get());
+        }
+        var itens = porCustodia.get(vencedora.get());
+        if (divergem(itens)) {
+            itens = releituraConsistente(idOperacao, vencedora.get(), blocos).orElseThrow(() ->
+                    divergente("A operação " + idOperacao + " sumiu da custódia " + vencedora.get().codigo()
+                            + " na releitura consistente"));
+        }
+        gravarNoCache(idOperacao, vencedora.get(), itens, itens);
+        return List.of(montar(vencedora.get(), blocos, itens));
     }
 
     /** Onde a próxima página da {@code Query} começa; {@code null} se esta foi a última. */
