@@ -74,7 +74,8 @@ class TracesIT {
                 .filter(span -> "dynamodb".equals(atributo(span, "dependencia")))
                 .toList();
         assertThat(dynamoDb).isNotEmpty().allSatisfy(span -> {
-            assertThat(span.getName()).isEqualTo("dynamodb BatchGetItem");
+            // Query na descoberta de custódia (ADR-0020); BatchGetItem com a custódia já em cache
+            assertThat(span.getName()).isIn("dynamodb Query", "dynamodb BatchGetItem");
             assertThat(span.getParentSpanId()).isEqualTo(http.getSpanId());
         });
     }

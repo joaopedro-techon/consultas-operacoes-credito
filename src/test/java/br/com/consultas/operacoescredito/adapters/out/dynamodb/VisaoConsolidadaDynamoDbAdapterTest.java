@@ -316,6 +316,8 @@ class VisaoConsolidadaDynamoDbAdapterTest {
                 .responses(Map.of())
                 .unprocessedKeys(requisicao.requestItems())
                 .build());
+        // Custódia conhecida: a leitura vai pelo BatchGetItem
+        cache.lembrar(1, Custodia.SF);
         var adapter = adapter(4);
 
         assertThatThrownBy(() -> adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO)))
@@ -354,6 +356,7 @@ class VisaoConsolidadaDynamoDbAdapterTest {
             }
             return BatchGetItemResponse.builder().responses(Map.of(tabela(requisicao), itens)).build();
         });
+        cache.lembrar(1, Custodia.SF);
         var adapter = adapter(4);
 
         assertThatThrownBy(() -> adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO)))
@@ -362,7 +365,9 @@ class VisaoConsolidadaDynamoDbAdapterTest {
     }
 
     @Test
-    void itemDaTabelaComBlocoDesconhecidoVira502() {
+    void itemDoBatchGetItemComBlocoDesconhecidoVira502() {
+        // No BatchGetItem só voltam as chaves pedidas: um bloco desconhecido é dado inválido na fonte
+        cache.lembrar(1, Custodia.SF);
         dynamoDb.responderBatch(requisicao -> BatchGetItemResponse.builder()
                 .responses(Map.of(tabela(requisicao), List.of(Map.of(
                         VisaoConsolidadaDynamoDbAdapter.PK, AttributeValue.fromN("1"),
@@ -387,8 +392,12 @@ class VisaoConsolidadaDynamoDbAdapterTest {
         assertThat(operacoes.getFirst().blocosIndisponiveis()).isEmpty();
     }
 
+    // ---------------------------------------------------------------------------------------------------------
+    // Descoberta de custódia por Query na PK (ADR-0020)
+    // ---------------------------------------------------------------------------------------------------------
+
     @Test
-    void semCustodiaEmCacheProcuraNasQuatroCustodiasEFicaComADeMaiorPrecedencia() {
+    void semCustodiaEmCacheDescobreNumaQueryPelaPkEFicaComADeMaiorPrecedencia() {
         dynamoDb.custodiasComItens(Set.of(Custodia.SF, Custodia.NSF));
         var adapter = adapter(4);
 
@@ -398,11 +407,86 @@ class VisaoConsolidadaDynamoDbAdapterTest {
             assertThat(operacao.custodia()).contains(Custodia.NSF);
             assertThat(operacao.blocosIndisponiveis()).isEmpty();
         });
-        // 4 custódias × 2 blocos num só BatchGetItem
-        assertThat(dynamoDb.chamadasBatch()).isEqualTo(1);
-        assertThat(dynamoDb.custodiasPedidas()).containsExactlyInAnyOrder(Custodia.values());
+        // Todas as custódias numa Query só, sem BatchGetItem
+        assertThat(dynamoDb.queriesNaTabelaBase()).singleElement().satisfies(query -> {
+            assertThat(query.indexName()).isNull();
+            assertThat(query.keyConditionExpression()).isEqualTo("#pk = :id");
+            assertThat(query.expressionAttributeValues().get(":id").n()).isEqualTo("1");
+            assertThat(query.consistentRead()).as("leitura eventual, como o BatchGetItem").isNotEqualTo(true);
+        });
+        assertThat(dynamoDb.chamadasBatch()).isZero();
         assertThat(cache.custodia(1)).contains(Custodia.NSF);
         assertThat(metricas.get(MetricasDeCustodia.DUPLICADA).counter().count()).isEqualTo(1);
+    }
+
+    @Test
+    void descobertaFicaSoComOsBlocosPedidosEIgnoraBlocosQueAApiNaoConhece() {
+        dynamoDb.custodiasComItens(Set.of(Custodia.F5));
+        dynamoDb.responderQueryNaTabelaBase(requisicao -> QueryResponse.builder()
+                .items(itemDaTabela(1, "F5#EXPAND#OPERACAO"), itemDaTabela(1, "F5#EXPAND#SALDO"),
+                        itemDaTabela(1, "F5#EXPAND#PARCELAS"),
+                        // Bloco novo, gravado por um escritor antes de a API conhecê-lo: ignorado, não 502
+                        itemDaTabela(1, "F5#EXPAND#BLOCO_FUTURO"))
+                .build());
+        var adapter = adapter(4, VersaoDosBlocos.POR_BLOCO);
+
+        var operacoes = adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO, Bloco.SALDO));
+
+        assertThat(operacoes).singleElement().satisfies(operacao -> {
+            assertThat(operacao.custodia()).contains(Custodia.F5);
+            assertThat(operacao.blocos()).containsOnlyKeys(Bloco.OPERACAO, Bloco.SALDO);
+        });
+        assertThat(cache.gravacoes).singleElement().satisfies(gravacao ->
+                assertThat(gravacao.blocos()).containsOnlyKeys(Bloco.OPERACAO, Bloco.SALDO));
+    }
+
+    @Test
+    void descobertaSegueAsPaginasDaQuery() {
+        // A Query devolve no máximo 1 MB por página: a operação pode vir em mais de uma
+        dynamoDb.responderQueryNaTabelaBase(requisicao -> requisicao.hasExclusiveStartKey()
+                ? QueryResponse.builder().items(itemDaTabela(1, "SF#EXPAND#SALDO")).build()
+                : QueryResponse.builder().items(itemDaTabela(1, "SF#EXPAND#OPERACAO"))
+                        .lastEvaluatedKey(itemDaTabela(1, "SF#EXPAND#OPERACAO"))
+                        .build());
+        var adapter = adapter(4);
+
+        var operacoes = adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO, Bloco.SALDO));
+
+        assertThat(operacoes).singleElement().satisfies(operacao ->
+                assertThat(operacao.blocosIndisponiveis()).isEmpty());
+        assertThat(dynamoDb.queriesNaTabelaBase()).hasSize(2);
+    }
+
+    @Test
+    void itemDaDescobertaSemTextoDetalheVira502SemContarNoCircuito() {
+        dynamoDb.responderQueryNaTabelaBase(requisicao -> QueryResponse.builder()
+                .items(Map.of(VisaoConsolidadaDynamoDbAdapter.PK, AttributeValue.fromN("1"),
+                        VisaoConsolidadaDynamoDbAdapter.SK, AttributeValue.fromS("SF#EXPAND#OPERACAO")))
+                .build());
+        var adapter = adapter(4);
+
+        assertThatThrownBy(() -> adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO)))
+                .isInstanceOf(VisaoConsolidadaInvalidaException.class)
+                .hasMessageContaining(VisaoConsolidadaDynamoDbAdapter.TEXTO_DETALHE);
+        assertThat(circuitBreaker.getMetrics().getNumberOfFailedCalls()).isZero();
+    }
+
+    @Test
+    void falhaDaQueryDeDescobertaContaNoCircuito() {
+        dynamoDb.responderQueryNaTabelaBase(requisicao -> {
+            throw DynamoDbException.builder().statusCode(500).message("falha").build();
+        });
+        var adapter = adapter(4);
+
+        assertThatThrownBy(() -> adapter.buscar(new CriterioConsulta.PorOperacao(1), EnumSet.of(Bloco.OPERACAO)))
+                .isExactlyInstanceOf(FalhaNaFonteDeOperacoesException.class);
+        assertThat(circuitBreaker.getMetrics().getNumberOfFailedCalls()).isEqualTo(1);
+    }
+
+    private static Map<String, AttributeValue> itemDaTabela(long id, String sk) {
+        return Map.of(VisaoConsolidadaDynamoDbAdapter.PK, AttributeValue.fromN(Long.toString(id)),
+                VisaoConsolidadaDynamoDbAdapter.SK, AttributeValue.fromS(sk),
+                VisaoConsolidadaDynamoDbAdapter.TEXTO_DETALHE, AttributeValue.fromB(SdkBytes.fromByteArray(JSON_VAZIO)));
     }
 
     @Test
@@ -428,7 +512,9 @@ class VisaoConsolidadaDynamoDbAdapterTest {
 
         assertThat(operacoes).singleElement().satisfies(operacao ->
                 assertThat(operacao.custodia()).contains(Custodia.OD));
-        assertThat(dynamoDb.chamadasBatch()).isEqualTo(2);
+        // BatchGetItem na custódia lembrada (vazia) e, depois, a descoberta
+        assertThat(dynamoDb.chamadasBatch()).isEqualTo(1);
+        assertThat(dynamoDb.queriesNaTabelaBase()).hasSize(1);
         assertThat(cache.custodia(1)).contains(Custodia.OD);
     }
 
@@ -586,14 +672,19 @@ class VisaoConsolidadaDynamoDbAdapterTest {
     }
 
     /**
-     * DynamoDB em memória: todo item pedido existe (com {@code texto_detalhe} = {@code {}}), salvo outra resposta.
-     * Item sem {@code codigo_identificador_carga} na resposta ganha o de {@link #versoes}, que sabe se a leitura é
+     * DynamoDB em memória. Na tabela base, toda operação tem todos os blocos em cada custódia de
+     * {@link #custodiasComItens} (todas, salvo outra configuração), com {@code texto_detalhe} = {@code {}}; o
+     * {@code BatchGetItem} e a {@code Query} pela PK leem esses mesmos itens, salvo outra resposta. Item sem
+     * {@code codigo_identificador_carga} na resposta ganha o de {@link #versoes}, que sabe se a leitura é
      * consistente ({@code null}: o item fica sem versão).
      */
     private static final class DynamoDbFalso implements DynamoDbClient {
 
+        private volatile Set<Custodia> custodiasComItens = EnumSet.allOf(Custodia.class);
         private volatile Function<QueryRequest, QueryResponse> query = requisicao -> QueryResponse.builder().build();
-        private volatile Function<BatchGetItemRequest, BatchGetItemResponse> batch = DynamoDbFalso::tudoEncontrado;
+        private volatile Function<QueryRequest, QueryResponse> queryNaTabelaBase = this::particaoDaOperacao;
+        private volatile Function<BatchGetItemRequest, BatchGetItemResponse> batch = this::encontradosNasCustodias;
+        private final List<QueryRequest> queriesNaTabelaBase = new CopyOnWriteArrayList<>();
         private volatile BiFunction<Map<String, AttributeValue>, Boolean, String> versoes = (item, consistente) ->
                 VERSAO;
         private volatile Function<Map<String, AttributeValue>, String> versoesDoIndice = item -> VERSAO;
@@ -627,6 +718,15 @@ class VisaoConsolidadaDynamoDbAdapterTest {
             this.batch = resposta;
         }
 
+        void responderQueryNaTabelaBase(Function<QueryRequest, QueryResponse> resposta) {
+            this.queryNaTabelaBase = resposta;
+        }
+
+        /** As {@code Query}s na tabela base (sem índice), na ordem: a descoberta de custódia. */
+        List<QueryRequest> queriesNaTabelaBase() {
+            return queriesNaTabelaBase;
+        }
+
         void demoraDoBatch(Duration demora) {
             this.demoraDoBatch = demora;
         }
@@ -639,7 +739,7 @@ class VisaoConsolidadaDynamoDbAdapterTest {
             this.versoesDoIndice = versoes;
         }
 
-        /** {@code ConsistentRead} de cada {@code BatchGetItem}, na ordem. */
+        /** {@code ConsistentRead} de cada leitura na tabela base ({@code Query} ou {@code BatchGetItem}), na ordem. */
         List<Boolean> leiturasConsistentes() {
             return leiturasConsistentes;
         }
@@ -672,21 +772,38 @@ class VisaoConsolidadaDynamoDbAdapterTest {
             return versionados;
         }
 
-        /** Só as custódias informadas têm itens (todos os blocos pedidos). */
+        /** Só as custódias informadas têm itens (todos os blocos), no {@code BatchGetItem} e na {@code Query}. */
         void custodiasComItens(Set<Custodia> custodias) {
-            batch = requisicao -> {
-                var itens = new ArrayList<Map<String, AttributeValue>>();
-                for (var chave : chaves(requisicao)) {
-                    var sk = chave.get(VisaoConsolidadaDynamoDbAdapter.SK).s();
-                    if (custodias.stream().anyMatch(custodia -> sk.startsWith(custodia.codigo() + "#"))) {
-                        var item = new HashMap<>(chave);
-                        item.put(VisaoConsolidadaDynamoDbAdapter.TEXTO_DETALHE,
-                                AttributeValue.fromB(SdkBytes.fromByteArray(JSON_VAZIO)));
-                        itens.add(item);
-                    }
+            this.custodiasComItens = custodias;
+        }
+
+        private BatchGetItemResponse encontradosNasCustodias(BatchGetItemRequest requisicao) {
+            var itens = new ArrayList<Map<String, AttributeValue>>();
+            for (var chave : chaves(requisicao)) {
+                var sk = chave.get(VisaoConsolidadaDynamoDbAdapter.SK).s();
+                if (custodiasComItens.stream().anyMatch(custodia -> sk.startsWith(custodia.codigo() + "#"))) {
+                    itens.add(item(chave.get(VisaoConsolidadaDynamoDbAdapter.PK), sk));
                 }
-                return BatchGetItemResponse.builder().responses(Map.of(tabela(requisicao), itens)).build();
-            };
+            }
+            return BatchGetItemResponse.builder().responses(Map.of(tabela(requisicao), itens)).build();
+        }
+
+        /** Todos os itens da operação da {@code Query}: cada bloco em cada custódia com itens. */
+        private QueryResponse particaoDaOperacao(QueryRequest requisicao) {
+            var idOperacao = requisicao.expressionAttributeValues().get(":id");
+            var itens = new ArrayList<Map<String, AttributeValue>>();
+            for (var custodia : custodiasComItens) {
+                for (var bloco : Bloco.values()) {
+                    itens.add(item(idOperacao, VisaoConsolidadaDynamoDbAdapter.sk(custodia, bloco)));
+                }
+            }
+            return QueryResponse.builder().items(itens).build();
+        }
+
+        private static Map<String, AttributeValue> item(AttributeValue idOperacao, String sk) {
+            return Map.of(VisaoConsolidadaDynamoDbAdapter.PK, idOperacao,
+                    VisaoConsolidadaDynamoDbAdapter.SK, AttributeValue.fromS(sk),
+                    VisaoConsolidadaDynamoDbAdapter.TEXTO_DETALHE, AttributeValue.fromB(SdkBytes.fromByteArray(JSON_VAZIO)));
         }
 
         Set<Custodia> custodiasPedidas() {
@@ -703,6 +820,15 @@ class VisaoConsolidadaDynamoDbAdapterTest {
 
         @Override
         public QueryResponse query(QueryRequest requisicao) {
+            if (requisicao.indexName() == null) {
+                var consistente = Boolean.TRUE.equals(requisicao.consistentRead());
+                queriesNaTabelaBase.add(requisicao);
+                leiturasConsistentes.add(consistente);
+                var resposta = queryNaTabelaBase.apply(requisicao);
+                return resposta.toBuilder()
+                        .items(versionar(resposta.items(), item -> versoes.apply(item, consistente)))
+                        .build();
+            }
             var resposta = query.apply(requisicao);
             return resposta.toBuilder().items(versionar(resposta.items(), versoesDoIndice)).build();
         }

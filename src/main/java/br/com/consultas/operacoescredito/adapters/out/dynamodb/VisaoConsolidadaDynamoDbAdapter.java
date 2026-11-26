@@ -33,6 +33,7 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.KeysAndAttributes;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
+import software.amazon.awssdk.services.dynamodb.model.QueryResponse;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -64,9 +65,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Descoberta de custódia (ADR-0012):
  * <ul>
  *     <li>OPERACAO: a custódia vem do cache de custódia, na mesma ida ao Valkey dos blocos. Conhecida, o
- *     {@code BatchGetItem} pede só os blocos ausentes do cache nela; se ela não tem mais a operação, ou se não
- *     estava em cache, os blocos são pedidos nas quatro custódias (até 36 chaves, um lote) e vale a de maior
- *     {@link PrecedenciaDeCustodia precedência} entre as que têm o bloco {@code operacao};</li>
+ *     {@code BatchGetItem} pede só os blocos ausentes do cache nela. Se ela não tem mais a operação, ou se não
+ *     estava em cache, uma {@code Query} pela PK lê a operação em todas as custódias de uma vez (ADR-0020), e vale
+ *     a de maior {@link PrecedenciaDeCustodia precedência} entre as que têm o bloco {@code operacao};</li>
  *     <li>CLIENTE e CONTA: {@code Query} no GSI esparso (mais recentes primeiro), que já traz o bloco
  *     {@code operacao} e a SK (logo, a custódia) de cada operação; operação repetida em mais de uma custódia fica
  *     com a de maior precedência. Depois, os demais blocos na custódia de cada operação: do cache, se estiverem lá
@@ -187,7 +188,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     // OPERACAO
     // ---------------------------------------------------------------------------------------------------------
 
-    /** Pela custódia do cache, se houver e ainda tiver a operação; senão, descoberta nas quatro custódias. */
+    /** Pela custódia do cache, se houver e ainda tiver a operação; senão, descoberta em todas as custódias. */
     private List<OperacaoConsultada> buscarPorOperacao(long idOperacao, Set<Bloco> blocos) {
         var leitura = cache.buscarOperacao(idOperacao, blocos);
         var lembrada = leitura.custodia();
@@ -234,7 +235,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     }
 
     private List<OperacaoConsultada> descobrir(long idOperacao, Set<Bloco> blocos, boolean haviaLembrada) {
-        var porCustodia = daOperacao(lerDoDynamoDb(chaves(idOperacao, TODAS, blocos), false), idOperacao);
+        var porCustodia = lerEmTodasAsCustodias(idOperacao, blocos);
         var encontradas = EnumSet.noneOf(Custodia.class);
         for (var custodia : Custodia.values()) {
             var achou = porCustodia.getOrDefault(custodia, Map.of()).containsKey(Bloco.OPERACAO);
@@ -263,6 +264,66 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
         }
         gravarNoCache(idOperacao, vencedora.get(), itens, itens);
         return List.of(montar(vencedora.get(), blocos, itens));
+    }
+
+    /**
+     * Os blocos pedidos da operação em todas as custódias, numa {@code Query} pela PK (ADR-0020).
+     * <p>
+     * <b>Por que {@code Query} e não {@code BatchGetItem}:</b> sem saber a custódia, o {@code BatchGetItem} teria de
+     * pedir cada bloco nas quatro custódias (até 36 chaves). Ele cobra cada chave pedida, inclusive as que não
+     * existem, com no mínimo 0,5 RRU cada: até 18 RRU, mesmo para uma operação que não existe. A {@code Query} cobra
+     * só o que existe, somado e arredondado a 4 KB uma vez: em geral 0,5 RRU.
+     * <p>
+     * A {@code Query} devolve todos os itens da partição, então o filtro é feito aqui: ficam só os blocos pedidos,
+     * nas custódias conhecidas, ou seja, exatamente as chaves que o {@code BatchGetItem} pediria. O resto é
+     * descartado sem decodificar, inclusive blocos que esta versão da API ainda não conhece (um escritor pode
+     * gravar um bloco novo antes de a API ser atualizada). Uma chave de ordenação não pode entrar num
+     * {@code FilterExpression}, e um filtro também não reduziria o custo. A resposta da {@code Query} tem no máximo
+     * 1 MB, então a leitura segue as páginas.
+     *
+     * @return itens por custódia e bloco; custódias sem a operação ficam ausentes
+     */
+    private Map<Custodia, Map<Bloco, ItemLido>> lerEmTodasAsCustodias(long idOperacao, Set<Bloco> blocos) {
+        // SK de cada bloco pedido em cada custódia: as mesmas chaves que um BatchGetItem pediria
+        var pedidas = new HashMap<String, CustodiaEBloco>();
+        for (var custodia : TODAS) {
+            for (var bloco : blocos) {
+                pedidas.put(sk(custodia, bloco), new CustodiaEBloco(custodia, bloco));
+            }
+        }
+
+        var porCustodia = new EnumMap<Custodia, Map<Bloco, ItemLido>>(Custodia.class);
+        Map<String, AttributeValue> inicio = null;
+        do {
+            var requisicao = QueryRequest.builder()
+                    .tableName(tabela)
+                    .expressionAttributeNames(Map.of("#pk", PK))
+                    .keyConditionExpression("#pk = :id")
+                    .expressionAttributeValues(Map.of(":id", AttributeValue.fromN(Long.toString(idOperacao))))
+                    .projectionExpression(PROJECAO)
+                    .exclusiveStartKey(inicio)
+                    .overrideConfiguration(resiliencia.noPrazo())
+                    .build();
+            var resposta = resiliencia.chamada("Query", () -> dynamoDb.query(requisicao));
+            for (var item : resposta.items()) {
+                var sk = item.get(SK);
+                var pedida = sk == null ? null : pedidas.get(sk.s());
+                if (pedida != null) {
+                    porCustodia.computeIfAbsent(pedida.custodia(), custodia -> new EnumMap<>(Bloco.class))
+                            .put(pedida.bloco(), new ItemLido(textoDetalhe(item, idOperacao),
+                                    VersaoDoRegistro.de(item.get(VERSAO))));
+                }
+            }
+            inicio = proximaPagina(resposta);
+        } while (inicio != null);
+        return porCustodia;
+    }
+
+    /** Onde a próxima página da {@code Query} começa; {@code null} se esta foi a última. */
+    private static Map<String, AttributeValue> proximaPagina(QueryResponse resposta) {
+        return resposta.hasLastEvaluatedKey() && !resposta.lastEvaluatedKey().isEmpty()
+                ? resposta.lastEvaluatedKey()
+                : null;
     }
 
     /**
@@ -363,9 +424,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
                         .add(new OperacaoDoIndice(idOperacao, chave.custodia(),
                                 new ItemLido(textoDetalhe(item, idOperacao), VersaoDoRegistro.de(item.get(VERSAO)))));
             }
-            inicio = resposta.hasLastEvaluatedKey() && !resposta.lastEvaluatedKey().isEmpty()
-                    ? resposta.lastEvaluatedKey()
-                    : null;
+            inicio = proximaPagina(resposta);
         } while (inicio != null && (limite.isEmpty() || porId.size() < limite.getAsInt()));
 
         var operacoes = new ArrayList<OperacaoDoIndice>(porId.size());

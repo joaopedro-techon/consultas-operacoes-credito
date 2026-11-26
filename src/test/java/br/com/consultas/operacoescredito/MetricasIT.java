@@ -133,11 +133,26 @@ class MetricasIT {
     @Test
     void chamadaAoDynamoDbEMedidaComoDependencia() {
         var consumidor = novoConsumidor();
-        var antes = contagemOuZero("consultas.dependencia", "dependencia:dynamodb", "operacao:BatchGetItem");
+        // Query (descoberta de custódia) ou BatchGetItem (custódia já em cache), conforme os testes anteriores
+        var antes = contagemOuZero("consultas.dependencia", "dependencia:dynamodb");
 
         consultarOperacao(consumidor, "100000001", null);
 
-        assertThat(contagemOuZero("consultas.dependencia", "dependencia:dynamodb", "operacao:BatchGetItem"))
+        assertThat(contagemOuZero("consultas.dependencia", "dependencia:dynamodb")).isGreaterThan(antes);
+    }
+
+    @Test
+    void capacidadeConsumidaPeloDynamoDbEMedidaPorOperacaoEIndice() {
+        var consumidor = novoConsumidor();
+        var antes = contagemOuZero("consultas.dynamodb.capacidade_consumida", "operacao:Query", "indice:gsi-cliente");
+
+        client.get().uri(ROTA + "?cpf_cnpj=52998224725")
+                .header("x-tipo-consulta", "CLIENTE")
+                .header("x-consumidor", consumidor)
+                .exchange()
+                .expectStatus().isOk();
+
+        assertThat(contagemOuZero("consultas.dynamodb.capacidade_consumida", "operacao:Query", "indice:gsi-cliente"))
                 .isGreaterThan(antes);
     }
 

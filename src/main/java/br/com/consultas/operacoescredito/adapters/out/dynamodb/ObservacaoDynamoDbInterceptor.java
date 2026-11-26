@@ -18,7 +18,8 @@ import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 class ObservacaoDynamoDbInterceptor implements ExecutionInterceptor {
 
     static final String DEPENDENCIA = "dynamodb";
-    private static final String SEM_INDICE = "nenhum";
+    /** Valor da tag {@code indice} nas chamadas à tabela base. */
+    static final String SEM_INDICE = "nenhum";
     private static final ExecutionAttribute<Observation> OBSERVACAO = new ExecutionAttribute<>("consultas.observacao");
 
     private final ObservationRegistry registry;

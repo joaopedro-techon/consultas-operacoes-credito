@@ -4,6 +4,7 @@ import io.github.resilience4j.bulkhead.BulkheadRegistry;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.common.circuitbreaker.configuration.CircuitBreakerConfigCustomizer;
 import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -31,8 +32,9 @@ import java.net.URI;
 class DynamoDbConfig {
 
     @Bean(destroyMethod = "close")
-    DynamoDbClient dynamoDbClient(DynamoDbProperties properties, ObservationRegistry observationRegistry) {
-        return construirCliente(properties, observationRegistry);
+    DynamoDbClient dynamoDbClient(DynamoDbProperties properties, ObservationRegistry observationRegistry,
+                                  MeterRegistry meterRegistry) {
+        return construirCliente(properties, observationRegistry, meterRegistry);
     }
 
     @Bean
@@ -87,12 +89,14 @@ class DynamoDbConfig {
         return CircuitBreakerConfigCustomizer.of(ResilienciaDynamoDb.NOME, ResilienciaDynamoDb::classificarFalhas);
     }
 
-    static DynamoDbClient construirCliente(DynamoDbProperties properties, ObservationRegistry observationRegistry) {
+    static DynamoDbClient construirCliente(DynamoDbProperties properties, ObservationRegistry observationRegistry,
+                                           MeterRegistry meterRegistry) {
         var builder = DynamoDbClient.builder()
                 .region(Region.of(properties.regiao()))
                 .httpClient(clienteHttp(properties.pool()))
                 .overrideConfiguration(ClientOverrideConfiguration.builder()
                         .addExecutionInterceptor(new ObservacaoDynamoDbInterceptor(observationRegistry))
+                        .addExecutionInterceptor(new CapacidadeConsumidaInterceptor(meterRegistry))
                         .retryStrategy(retry(properties.retry()))
                         .apiCallTimeout(properties.timeoutChamada())
                         .apiCallAttemptTimeout(properties.timeoutTentativa())

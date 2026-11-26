@@ -1,6 +1,7 @@
 package br.com.consultas.operacoescredito.adapters.out.dynamodb;
 
 import com.sun.net.httpserver.HttpServer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -55,7 +56,8 @@ class DynamoDbConfigTest {
         });
         servidor.start();
         cliente = DynamoDbConfig.construirCliente(propriedades(
-                "http://localhost:" + servidor.getAddress().getPort()), ObservationRegistry.NOOP);
+                "http://localhost:" + servidor.getAddress().getPort()), ObservationRegistry.NOOP,
+                new SimpleMeterRegistry());
     }
 
     @AfterEach
@@ -105,7 +107,8 @@ class DynamoDbConfigTest {
                 new DynamoDbProperties.Pool(1, Duration.ofSeconds(1), Duration.ofMillis(30), Duration.ofSeconds(2),
                         Duration.ofMinutes(5), Duration.ofSeconds(30)),
                 new DynamoDbProperties.Retry(0, Duration.ofMillis(1), Duration.ofMillis(5)));
-        try (var comUmaConexao = DynamoDbConfig.construirCliente(properties, ObservationRegistry.NOOP)) {
+        try (var comUmaConexao = DynamoDbConfig.construirCliente(properties, ObservationRegistry.NOOP,
+                new SimpleMeterRegistry())) {
             var ocupando = Thread.ofVirtual().start(() -> {
                 try {
                     comUmaConexao.getItem(b -> b.tableName("t").key(java.util.Map.of()));

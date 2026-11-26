@@ -400,8 +400,8 @@ uma operação, acrescente uma entrada em `OPERACOES` (com `custodias`) e rode `
 
 O cliente 52998224725 tem três operações em duas contas (SF e F5); a conta 434115000065874 e a
 434115000077712 têm duas operações cada. O cliente 11222333000181 (e a conta 434115000055501) tem 14
-operações nas quatro custódias: com todos os blocos no `expand`, o `BatchGetItem` passa de 100 chaves e é
-dividido em lotes.
+operações nas quatro custódias: com todos os blocos no `expand`, o `BatchGetItem` dos blocos (CLIENTE/CONTA) passa
+de 100 chaves e é dividido em lotes.
 
 Para rodar a aplicação fora do Docker contra o LocalStack do compose:
 

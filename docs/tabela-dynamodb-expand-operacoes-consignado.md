@@ -16,7 +16,7 @@ A chave primária é composta: `numero_operacao` (PK) + `custodia_expand` (SK). 
 
 | Índice | Partition key | Sort key | Uso |
 | --- | --- | --- | --- |
-| Tabela base | `numero_operacao` (N) | `custodia_expand` (S) | Ler os blocos de uma operação (`BatchGetItem` por custódia × bloco) |
+| Tabela base | `numero_operacao` (N) | `custodia_expand` (S) | Ler os blocos de uma operação (`BatchGetItem` na custódia conhecida; `Query` pela PK para descobri-la) |
 | `gsi-cliente` | `cpf_cnpj_cliente` (S) | `sk_gsi` (S) | Listar as operações de um cliente, da mais recente para a mais antiga |
 | `gsi-conta` | `conta_cliente` (S) | `sk_gsi` (S) | Listar as operações de uma conta, da mais recente para a mais antiga |
 
@@ -152,7 +152,7 @@ Todos os blocos repetem `id_operacao`. Valores monetários e taxas são decimais
 | Consulta | Índice | Condição de chave | Itens retornados |
 | --- | --- | --- | --- |
 | Blocos de uma operação, custódia conhecida | Tabela base (`BatchGetItem`) | `numero_operacao = :op` e `custodia_expand IN ('<C>#EXPAND#OPERACAO', '<C>#EXPAND#SALDO', ...)` | 1 por bloco |
-| Blocos de uma operação, custódia desconhecida | Tabela base (`BatchGetItem`) | as mesmas chaves nas 4 custódias (até 36 chaves, um lote) | 1 por bloco existente; duplicidade resolvida pela precedência |
+| Blocos de uma operação, custódia desconhecida | Tabela base (`Query`, ADR-0020) | `numero_operacao = :op` (todas as custódias); a API fica só com os blocos pedidos | Todos os itens da operação; duplicidade resolvida pela precedência |
 | Operações de um cliente | `gsi-cliente` (`Query`, `ScanIndexForward=false`) | `cpf_cnpj_cliente = :cpf` | 1 item `OPERACAO` por operação e custódia, da mais recente para a mais antiga |
 | Operações de uma conta | `gsi-conta` (`Query`, `ScanIndexForward=false`) | `conta_cliente = :conta` | Idem |
 | Demais blocos das operações de um cliente ou conta | Tabela base (`BatchGetItem`, lotes de 100) | `numero_operacao` + `<C>#EXPAND#<BLOCO>`, com `<C>` lida do `custodia_expand` do item do GSI | 1 por operação × bloco |

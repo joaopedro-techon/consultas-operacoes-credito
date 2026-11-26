@@ -131,7 +131,7 @@ Validação dos valores atuais:
 
 ### 3.5 DynamoDB
 
-Leituras eventualmente consistentes. Itens ≤ 4 KB custam 0,5 RRU cada **(P)**. Uma chave pedida no `BatchGetItem` e inexistente também consome o mínimo de 0,5 RRU **(P, conservador)**. Isso torna caro o pedido nas 4 custódias quando a custódia não está em cache (ADR-0012).
+Leituras eventualmente consistentes. Itens ≤ 4 KB custam 0,5 RRU cada **(P)**. Uma chave pedida no `BatchGetItem` e inexistente também consome o mínimo de 0,5 RRU **(P, conservador)**. Por isso, sem custódia em cache, a descoberta é uma `Query` pela PK (ADR-0020), que só cobra o que existe. As linhas abaixo ainda supõem o `BatchGetItem` nas 4 custódias e ficam conservadoras para a OPERACAO. Recalibre com a métrica `consultas.dynamodb.capacidade_consumida` (por `operacao` e `indice`).
 
 | Tráfego (54.000 req/s) | Chaves no DynamoDB por consulta | RRU/s **(E)** |
 | --- | --- | --- |
