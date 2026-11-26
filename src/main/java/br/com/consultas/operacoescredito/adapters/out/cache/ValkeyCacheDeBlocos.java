@@ -5,6 +5,7 @@ import br.com.consultas.operacoescredito.config.observabilidade.Observacoes;
 import br.com.consultas.operacoescredito.config.resiliencia.PrazoDaRequisicao;
 import br.com.consultas.operacoescredito.domain.Bloco;
 import br.com.consultas.operacoescredito.domain.Custodia;
+import br.com.consultas.operacoescredito.domain.VersaoDosBlocos;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.lettuce.core.RedisCommandInterruptedException;
@@ -26,6 +27,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -37,21 +39,24 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 /**
- * Cache versionado no Valkey (ADR-0018):
+ * Cache versionado no Valkey (ADR-0018, ADR-0019):
  * <ul>
- *     <li>blocos: hash {@code op:{id_operacao}:{custodia}} com {@code versao} (epoch ms), um campo por bloco
- *     ({@code texto_detalhe} GZIP como veio do DynamoDB) e, se invalidado, {@code marcador}; TTL {@code ttl};</li>
+ *     <li>blocos: um hash por operação e custódia no {@link FormatoDoHash formato} da regra de versão dos blocos.
+ *     Com versão única, {@code op:{id_operacao}:{custodia}} com {@code versao} (epoch ms), um campo por bloco
+ *     ({@code texto_detalhe} GZIP como veio do DynamoDB) e, se invalidado, {@code marcador}. Com versão por bloco,
+ *     {@code opb:{id_operacao}:{custodia}} com {@code {bloco}}, {@code v:{bloco}} e, se invalidado,
+ *     {@code m:{bloco}}. TTL {@code ttl};</li>
  *     <li>custódia: hash {@code custodia-vc:{id_operacao}} com {@code custodia}, {@code versao} e, se invalidado,
  *     {@code marcador}; TTL {@code ttl-custodia}. A chave compartilhada {@code custodia:{id_operacao}} (ADR-0017)
  *     continua sendo gravada como antes, mas não é lida.</li>
  * </ul>
  * Leitura, na requisição: um {@code HMGET} por hash, todos em pipeline e esperados juntos, no máximo pelo timeout
- * de comando ({@code spring.data.redis.timeout}). Um {@code HMGET} é atômico, então os blocos lidos de um hash são
- * sempre da mesma versão. Não lê com menos de {@code prazo-minimo-restante} do prazo da requisição, nem com mais de
+ * de comando ({@code spring.data.redis.timeout}). Um {@code HMGET} é atômico: com versão única, os blocos lidos de
+ * um hash são sempre da mesma versão. Não lê com menos de {@code prazo-minimo-restante} do prazo da requisição, nem com mais de
  * {@code max-chaves-por-consulta} blocos (operações × blocos).
  * <p>
- * Gravação, fora da requisição (virtual thread, no máximo {@code max-gravacoes-simultaneas}): o script
- * {@link ScriptValkey#GRAVAR_VERSIONADO} por hash, em rodadas de até {@code chaves-por-comando} comandos em pipeline,
+ * Gravação, fora da requisição (virtual thread, no máximo {@code max-gravacoes-simultaneas}): o script do formato
+ * ({@link ScriptValkey#GRAVAR_VERSIONADO} ou {@link ScriptValkey#GRAVAR_POR_BLOCO}) por hash, em rodadas de até {@code chaves-por-comando} comandos em pipeline,
  * cada rodada dentro do timeout de comando. A resposta da consulta não espera a gravação.
  * <p>
  * Fail-open: toda leitura e cada gravação passam pelo circuit breaker {@value CacheConfig#CIRCUIT_BREAKER}; falha ou
@@ -90,6 +95,7 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
     }
 
     private final ComandosValkey comandos;
+    private final FormatoDoHash formato;
     private final CircuitBreaker circuitBreaker;
     private final ObservationRegistry observationRegistry;
     private final Duration timeoutComando;
@@ -103,10 +109,11 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
     private final Executor gravacoes;
     private final Map<Resultado, Map<Bloco, Counter>> contadores = new EnumMap<>(Resultado.class);
 
-    ValkeyCacheDeBlocos(ComandosValkey comandos, CircuitBreaker circuitBreaker, ObservationRegistry observationRegistry,
-                        MeterRegistry meterRegistry, CacheProperties properties, Duration timeoutComando,
-                        Executor gravacoes) {
+    ValkeyCacheDeBlocos(ComandosValkey comandos, VersaoDosBlocos versaoDosBlocos, CircuitBreaker circuitBreaker,
+                        ObservationRegistry observationRegistry, MeterRegistry meterRegistry,
+                        CacheProperties properties, Duration timeoutComando, Executor gravacoes) {
         this.comandos = comandos;
+        this.formato = FormatoDoHash.de(versaoDosBlocos);
         this.circuitBreaker = circuitBreaker;
         this.observationRegistry = observationRegistry;
         this.timeoutComando = timeoutComando;
@@ -133,9 +140,9 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
         }
         var leituras = new ArrayList<LeituraDeHash>(1 + Custodia.values().length);
         leituras.add(new LeituraDeHash(bytes(CacheDeCustodia.chaveVersionada(idOperacao)), CAMPOS_DA_CUSTODIA));
-        var campos = camposDosBlocos(pedidos);
+        var campos = formato.campos(pedidos);
         for (var custodia : Custodia.values()) {
-            leituras.add(new LeituraDeHash(new ChaveDeOperacao(idOperacao, custodia).bytes(), campos));
+            leituras.add(new LeituraDeHash(formato.chave(new ChaveDeOperacao(idOperacao, custodia)), campos));
         }
         var valores = executar("HMGET", null, () -> hmget(leituras));
         if (valores.isEmpty()) {
@@ -147,25 +154,26 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
             contar(pedidos, Resultado.MISS);
             return LeituraDaOperacao.VAZIA;
         }
-        var emCache = blocosEmCache(valores.get().get(1 + lembrada.get().custodia().ordinal()), pedidos);
+        var emCache = formato.ler(valores.get().get(1 + lembrada.get().custodia().ordinal()), pedidos);
         contar(pedidos, emCache);
         return new LeituraDaOperacao(lembrada, emCache);
     }
 
     @Override
-    public Map<ChaveDeOperacao, BlocosEmCache> buscar(Map<ChaveDeOperacao, Long> versoes, Set<Bloco> blocos) {
-        if (versoes.isEmpty() || blocos.isEmpty()) {
+    public Map<ChaveDeOperacao, BlocosEmCache> buscar(Map<ChaveDeOperacao, OptionalLong> versoesExigidas,
+                                                      Set<Bloco> blocos) {
+        if (versoesExigidas.isEmpty() || blocos.isEmpty()) {
             return Map.of();
         }
         var pedidos = List.copyOf(blocos);
-        var chaves = List.copyOf(versoes.keySet());
+        var chaves = List.copyOf(versoesExigidas.keySet());
         if ((long) chaves.size() * pedidos.size() > maxChavesPorConsulta
                 || !PrazoDaRequisicao.comporta(prazoMinimoRestante)) {
             contar(pedidos, chaves.size(), Resultado.IGNORADO);
             return Map.of();
         }
-        var campos = camposDosBlocos(pedidos);
-        var leituras = chaves.stream().map(chave -> new LeituraDeHash(chave.bytes(), campos)).toList();
+        var campos = formato.campos(pedidos);
+        var leituras = chaves.stream().map(chave -> new LeituraDeHash(formato.chave(chave), campos)).toList();
         var valores = executar("HMGET", null, () -> hmget(leituras));
         if (valores.isEmpty()) {
             contar(pedidos, chaves.size(), Resultado.INDISPONIVEL);
@@ -174,8 +182,9 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
         var encontrados = new HashMap<ChaveDeOperacao, BlocosEmCache>();
         for (int i = 0; i < chaves.size(); i++) {
             var chave = chaves.get(i);
-            var emCache = blocosEmCache(valores.get().get(i), pedidos)
-                    .filter(blocosDoHash -> blocosDoHash.versao() == versoes.get(chave));
+            var emCache = formato.ler(valores.get().get(i), pedidos)
+                    .map(blocosDoHash -> naVersao(blocosDoHash, versoesExigidas.get(chave)))
+                    .filter(blocosDoHash -> !blocosDoHash.blocos().isEmpty());
             contar(pedidos, emCache);
             emCache.ifPresent(blocosDoHash -> encontrados.put(chave, blocosDoHash));
         }
@@ -194,17 +203,16 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
             if (gravacao.blocos().isEmpty()) {
                 continue;
             }
+            var argumentos = formato.argumentos(gravacao, ttlBlocos);
+            if (argumentos.isEmpty()) {
+                log.debug("Blocos da operação {} em versões diferentes; hash de versão única não gravado",
+                        gravacao.chave().idOperacao());
+                continue;
+            }
             total += gravacao.blocos().size();
-            var argumentos = new ArrayList<byte[]>(2 + 2 * gravacao.blocos().size());
-            argumentos.add(bytes(Long.toString(gravacao.versao())));
-            argumentos.add(ttlBlocos);
-            gravacao.blocos().forEach((bloco, textoDetalhe) -> {
-                argumentos.add(bytes(bloco.nome()));
-                argumentos.add(textoDetalhe);
-            });
-            var chave = gravacao.chave().bytes();
-            comandosDeGravacao.add(() -> comandos.executar(ScriptValkey.GRAVAR_VERSIONADO, chave,
-                    argumentos.toArray(byte[][]::new)));
+            var chave = formato.chave(gravacao.chave());
+            var script = formato.script();
+            comandosDeGravacao.add(() -> comandos.executar(script, chave, argumentos.get()));
         }
         for (var custodia : custodias) {
             var codigo = bytes(custodia.custodia().codigo());
@@ -263,23 +271,18 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
                 .map(encontrada -> new CustodiaLembrada(encontrada, versao.get()));
     }
 
-    /**
-     * Blocos do hash de uma operação: os dois primeiros valores são {@code versao} e {@code marcador}, depois um por
-     * bloco pedido. Hash inexistente, com marcador ou com versão fora do formato: vazio.
-     */
-    private static Optional<BlocosEmCache> blocosEmCache(List<byte[]> valores, List<Bloco> pedidos) {
-        var versao = versao(valores.get(0));
-        if (versao.isEmpty() || valores.get(1) != null) {
-            return Optional.empty();
+    /** Só os blocos na versão exigida; sem versão exigida, todos. */
+    private static BlocosEmCache naVersao(BlocosEmCache blocosDoHash, OptionalLong exigida) {
+        if (exigida.isEmpty()) {
+            return blocosDoHash;
         }
-        var blocos = new EnumMap<Bloco, byte[]>(Bloco.class);
-        for (int i = 0; i < pedidos.size(); i++) {
-            var valor = valores.get(2 + i);
-            if (valor != null) {
-                blocos.put(pedidos.get(i), valor);
+        var naVersao = new EnumMap<Bloco, BlocoVersionado>(Bloco.class);
+        blocosDoHash.blocos().forEach((bloco, versionado) -> {
+            if (versionado.versao() == exigida.getAsLong()) {
+                naVersao.put(bloco, versionado);
             }
-        }
-        return Optional.of(new BlocosEmCache(versao.get(), blocos));
+        });
+        return new BlocosEmCache(naVersao);
     }
 
     private static Optional<Long> versao(byte[] valor) {
@@ -291,16 +294,6 @@ class ValkeyCacheDeBlocos implements CacheConfig.CacheDeBlocosECustodia {
         } catch (NumberFormatException e) {
             return Optional.empty();
         }
-    }
-
-    private static byte[][] camposDosBlocos(List<Bloco> pedidos) {
-        var campos = new byte[2 + pedidos.size()][];
-        campos[0] = bytes(CAMPO_VERSAO);
-        campos[1] = bytes(CAMPO_MARCADOR);
-        for (int i = 0; i < pedidos.size(); i++) {
-            campos[2 + i] = bytes(pedidos.get(i).nome());
-        }
-        return campos;
     }
 
     private static byte[] bytes(String texto) {

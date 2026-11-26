@@ -14,7 +14,7 @@ import java.util.HexFormat;
 record ScriptValkey(String corpo, String sha1) {
 
     /**
-     * Gravação versionada de um hash (ADR-0018). {@code KEYS[1]}: o hash; {@code ARGV[1]}: a versão do registro em
+     * Gravação de um hash de versão única (ADR-0018). {@code KEYS[1]}: o hash; {@code ARGV[1]}: a versão do registro em
      * epoch ms; {@code ARGV[2]}: o TTL em ms; {@code ARGV[3..]}: pares campo/valor (ao menos um). Compara com o
      * campo {@code versao} que já está no hash:
      * <ul>
@@ -47,6 +47,41 @@ record ScriptValkey(String corpo, String sha1) {
 
     /** Resultado do {@link #GRAVAR_VERSIONADO}: rejeitado por haver versão maior no cache. */
     static final long REJEITADO = 0;
+
+    /**
+     * Gravação de um hash com versão por bloco (ADR-0019). {@code KEYS[1]}: o hash; {@code ARGV[1]}: o TTL em ms;
+     * {@code ARGV[2..]}: trios bloco/versão em epoch ms/valor (ao menos um). Cada bloco é comparado com o seu campo
+     * {@code v:{bloco}}, independente dos demais:
+     * <ul>
+     *     <li>ausente (ou fora do formato), menor, ou igual com {@code m:{bloco}} (o invalidador já sabe dessa versão,
+     *     mas sem o dado): grava o bloco e a versão e apaga o marcador;</li>
+     *     <li>igual, sem marcador e com o bloco: mantém;</li>
+     *     <li>maior: rejeita só esse bloco.</li>
+     * </ul>
+     * O TTL só é definido quando o hash é criado, nunca renovado: segue sendo a rede de segurança para uma invalidação
+     * perdida. Devolve quantos blocos foram gravados ({@code 0}: todos rejeitados ou mantidos).
+     */
+    static final ScriptValkey GRAVAR_POR_BLOCO = de("""
+            local criado = redis.call('EXISTS', KEYS[1]) == 0
+            local gravados = 0
+            for i = 2, #ARGV, 3 do
+              local bloco = ARGV[i]
+              local versao = tonumber(ARGV[i + 1])
+              local atual = redis.call('HMGET', KEYS[1], 'v:' .. bloco, 'm:' .. bloco, bloco)
+              local versaoAtual = atual[1] and tonumber(atual[1])
+              local manter = versaoAtual and (versaoAtual > versao
+                or (versaoAtual == versao and not atual[2] and atual[3]))
+              if not manter then
+                redis.call('HSET', KEYS[1], bloco, ARGV[i + 2], 'v:' .. bloco, ARGV[i + 1])
+                redis.call('HDEL', KEYS[1], 'm:' .. bloco)
+                gravados = gravados + 1
+              end
+            end
+            if criado and gravados > 0 then
+              redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            end
+            return gravados
+            """);
 
     static ScriptValkey de(String corpo) {
         try {

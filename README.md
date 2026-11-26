@@ -137,9 +137,20 @@ sem permissão) amostradas a uma linha por instância a cada 5 s, com quantas fo
 
 ## Cache versionado (Valkey)
 
-Cache dos dados (blocos) da visão consolidada (ADR-0002), **versionado** (ADR-0018): uma consulta nunca entrega
-blocos de versões do registro (`codigo_identificador_carga`) diferentes da mesma operação, e uma leitura atrasada
-nunca regrava no cache um dado mais antigo do que o que ele já conhece.
+Cache dos dados (blocos) da visão consolidada (ADR-0002), **versionado**: uma leitura atrasada nunca regrava no
+cache um dado mais antigo do que o que ele já conhece. O formato segue a **regra de versão dos blocos**
+(`consultas.visao-consolidada.versao-dos-blocos`, ADR-0019):
+
+| | `POR_BLOCO` (default) | `UNICA` (ADR-0018) |
+| --- | --- | --- |
+| Escritores | gravam só os blocos que mudaram (ou todos) | **só** escritores que regravam todos os blocos; com escritores parciais, toda operação atualizada parcialmente vira 503 |
+| Consulta | pode entregar blocos de versões diferentes da mesma operação; sem releitura nem 503 por divergência | nunca entrega blocos de versões diferentes; diverge → `ConsistentRead` (até 2×) → 503 |
+| Hash de blocos | `opb:{id}:{custodia}`: `{bloco}`, `v:{bloco}`, `m:{bloco}` | `op:{id}:{custodia}`: `versao`, `marcador`, um campo por bloco |
+| Invalidação | só os blocos atualizados (a `originacao` continua em cache depois de um pagamento) | o hash inteiro |
+| Script | `ScriptValkey.GRAVAR_POR_BLOCO` | `ScriptValkey.GRAVAR_VERSIONADO` |
+
+O restante desta seção descreve a versão única; com versão por bloco valem as mesmas regras, aplicadas bloco a
+bloco, e a custódia vai ao cache na versão do bloco `operacao`.
 
 - Hash `op:{id_operacao}:{custodia}`: campo `versao` (epoch ms), um campo por bloco (nome canônico; valor =
   `texto_detalhe` em GZIP exatamente como veio do DynamoDB) e, quando invalidado, `marcador`. TTL

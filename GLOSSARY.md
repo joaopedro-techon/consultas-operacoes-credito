@@ -64,8 +64,14 @@ _Avoid_: carga online, batch (sozinho)
 Uma execução da Atualização Offline. Um evento da Atualização Online não é uma carga.
 
 **Versão do registro**:
-Instante (`codigo_identificador_carga`) que data o conteúdo de uma operação de crédito em uma custódia. Toda atualização, Online ou Offline, regrava todos os blocos da operação de uma vez com a mesma versão; vence a de versão maior, e versão igual ou menor é descartada inteira. Uma consulta nunca entrega blocos de versões diferentes da mesma operação.
+Instante (`codigo_identificador_carga`) que data o conteúdo de um bloco de uma operação de crédito em uma custódia. Vence a versão maior; versão igual ou menor é descartada. Como os blocos se relacionam com a versão depende da regra de versão dos blocos.
 _Avoid_: timestamp, data de alteração
+
+**Regra de versão dos blocos**:
+Escolha de configuração que define se os blocos de uma operação compartilham a versão do registro:
+- **Versão única**: toda atualização, Online ou Offline, regrava todos os blocos da operação com a mesma versão, e uma consulta nunca entrega blocos de versões diferentes da mesma operação. Só vale quando os escritores regravam a operação inteira.
+- **Versão por bloco**: uma atualização regrava só os blocos que mudaram (um pagamento muda parcelas, saldo, amortizações e recebimentos, mas não a originação), e cada bloco tem a sua versão. Uma consulta pode entregar blocos de versões diferentes, inclusive, por um instante, parte dos blocos de uma mesma atualização.
+_Avoid_: modo de consistência, versão mista
 
 ## Consulta
 
@@ -101,11 +107,11 @@ _Avoid_: timeout (reservado aos limites de conexão, pool e resposta de uma cham
 Cópia de leitura das operações, otimizada para rapidez e eventualmente consistente com a fonte primária.
 
 **Cache de blocos**:
-Cópia temporária (Valkey, TTL) dos blocos de uma operação em uma custódia já lidos da visão consolidada, todos de uma mesma versão do registro (`op:{id_operacao}:{custodia}`, ADR-0018). Nunca guarda blocos de versões diferentes e nunca troca uma versão por outra menor. Só otimização: indisponível, a consulta segue no DynamoDB (fail-open). Não guarda a lista de operações de um cliente ou conta e não vale para a fonte primária (ADR-0002).
+Cópia temporária (Valkey, TTL) dos blocos de uma operação em uma custódia já lidos da visão consolidada, Com versão única, todos os blocos são da mesma versão do registro, e o cache nunca guarda blocos de versões diferentes (ADR-0018). Com versão por bloco, cada bloco tem a sua versão e é substituído ou invalidado sozinho. Nas duas regras, nunca troca uma versão por outra menor. Só otimização: indisponível, a consulta segue no DynamoDB (fail-open). Não guarda a lista de operações de um cliente ou conta e não vale para a fonte primária (ADR-0002).
 _Avoid_: cache de consulta, cache de resposta
 
 **Marcador de invalidação**:
-Registro, no cache de blocos, de que a operação foi atualizada para uma versão do registro: tira os blocos antigos de circulação e impede que uma leitura com versão menor os traga de volta (ADR-0018).
+Registro, no cache de blocos, de que a operação foi atualizada para uma versão do registro (com versão por bloco, de que aquele bloco foi atualizado): tira os blocos antigos de circulação e impede que uma leitura com versão menor os traga de volta (ADR-0018).
 _Avoid_: tombstone, invalidação (sozinho)
 
 **Cache de custódia**:

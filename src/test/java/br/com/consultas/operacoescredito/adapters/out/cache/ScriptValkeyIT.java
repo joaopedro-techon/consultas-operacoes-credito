@@ -144,6 +144,69 @@ class ScriptValkeyIT {
         assertThat(new String(valores.get(2), StandardCharsets.UTF_8)).isEqualTo("p1");
     }
 
+    // ---------------------------------------------------------------------------------------------------------
+    // Versão por bloco (ADR-0019)
+    // ---------------------------------------------------------------------------------------------------------
+
+    private static final String CHAVE_POR_BLOCO = "opb:1:SF";
+
+    @Test
+    void porBlocoHashAusenteEGravadoComAVersaoDeCadaBlocoETtl() {
+        assertThat(gravarPorBloco("parcelas", V2, "p2", "originacao", V1, "o1")).isEqualTo(2);
+
+        assertThat(valkey.sync().hgetall(CHAVE_POR_BLOCO)).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "parcelas", "p2", "v:parcelas", Long.toString(V2),
+                "originacao", "o1", "v:originacao", Long.toString(V1)));
+        assertThat(valkey.sync().pttl(CHAVE_POR_BLOCO)).isBetween(TTL - 5_000, TTL);
+    }
+
+    @Test
+    void porBlocoVersaoMaiorDeUmBlocoNaoAfetaOsDemais() {
+        gravarPorBloco("parcelas", V1, "p1", "originacao", V1, "o1");
+        valkey.sync().pexpire(CHAVE_POR_BLOCO, 10_000);
+
+        // Pagamento: parcelas na V2; a originação segue na V1
+        assertThat(gravarPorBloco("parcelas", V2, "p2")).isEqualTo(1);
+
+        assertThat(valkey.sync().hgetall(CHAVE_POR_BLOCO)).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "parcelas", "p2", "v:parcelas", Long.toString(V2),
+                "originacao", "o1", "v:originacao", Long.toString(V1)));
+        assertThat(valkey.sync().pttl(CHAVE_POR_BLOCO)).as("TTL não renovado").isLessThanOrEqualTo(10_000);
+    }
+
+    @Test
+    void porBlocoLeituraAtrasadaNaoSobrescreveOMarcadorDoBloco() {
+        gravarPorBloco("parcelas", V1, "p1", "originacao", V1, "o1");
+        // O invalidador soube da V2 das parcelas
+        valkey.sync().hdel(CHAVE_POR_BLOCO, "parcelas");
+        valkey.sync().hset(CHAVE_POR_BLOCO, Map.of("v:parcelas", Long.toString(V2), "m:parcelas", "1"));
+
+        assertThat(gravarPorBloco("parcelas", V1, "p1", "originacao", V1, "o1")).isZero();
+
+        assertThat(valkey.sync().hgetall(CHAVE_POR_BLOCO)).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "v:parcelas", Long.toString(V2), "m:parcelas", "1",
+                "originacao", "o1", "v:originacao", Long.toString(V1)));
+    }
+
+    @Test
+    void porBlocoLeituraNaVersaoDoMarcadorGravaOBlocoEApagaOMarcador() {
+        valkey.sync().hset(CHAVE_POR_BLOCO, Map.of("v:parcelas", Long.toString(V2), "m:parcelas", "1"));
+
+        assertThat(gravarPorBloco("parcelas", V2, "p2")).isEqualTo(1);
+
+        assertThat(valkey.sync().hgetall(CHAVE_POR_BLOCO)).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "parcelas", "p2", "v:parcelas", Long.toString(V2)));
+    }
+
+    private static long gravarPorBloco(Object... blocoVersaoValor) {
+        var argumentos = new byte[1 + blocoVersaoValor.length][];
+        argumentos[0] = bytes(Long.toString(TTL));
+        for (int i = 0; i < blocoVersaoValor.length; i++) {
+            argumentos[1 + i] = bytes(String.valueOf(blocoVersaoValor[i]));
+        }
+        return comandos.executar(ScriptValkey.GRAVAR_POR_BLOCO, bytes(CHAVE_POR_BLOCO), argumentos).join();
+    }
+
     private static long gravar(long versao, String campo, String valor) {
         return comandos.executar(ScriptValkey.GRAVAR_VERSIONADO, bytes(CHAVE), bytes(Long.toString(versao)),
                 bytes(Long.toString(TTL)), bytes(campo), bytes(valor)).join();

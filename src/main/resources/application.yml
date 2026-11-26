@@ -76,6 +76,14 @@ consultas:
   # Custódias SF, F5, OD e NSF (ADR-0012): ordem que decide a custódia de uma operação encontrada em mais de uma
   custodia:
     precedencia: ${CONSULTAS_CUSTODIA_PRECEDENCIA:NSF,SF,F5,OD}
+  visao-consolidada:
+    # Regra de versão dos blocos (ADR-0019):
+    # - POR_BLOCO: cada bloco tem a sua versão; os escritores podem regravar só os blocos que mudaram e a consulta
+    #   entrega blocos de versões diferentes da mesma operação. Funciona com qualquer escritor.
+    # - UNICA: blocos de uma operação sempre na mesma versão, senão releitura consistente e 503 (ADR-0018). SÓ com
+    #   escritores que regravam todos os blocos a cada atualização: com escritores parciais, toda operação
+    #   atualizada parcialmente vira 503.
+    versao-dos-blocos: ${CONSULTAS_VISAO_CONSOLIDADA_VERSAO_DOS_BLOCOS:POR_BLOCO}
   dynamodb:
     tabela: ${CONSULTAS_DYNAMODB_TABELA:operacoes-credito}
     regiao: ${AWS_REGION:sa-east-1}
@@ -104,8 +112,9 @@ consultas:
       tentativas-extras: 2
       backoff-base: 10ms
       backoff-maximo: 50ms
-  # Cache versionado no Valkey: um hash por operação e custódia, op:{id}:{custodia} (ADR-0002, ADR-0018);
-  # conexão em spring.data.redis. O TTL só é definido quando o hash é criado ou substituído (nunca renovado)
+  # Cache versionado no Valkey: um hash por operação e custódia, op:{id}:{custodia} com versão única e
+  # opb:{id}:{custodia} com versão por bloco (ADR-0002, ADR-0018, ADR-0019); conexão em spring.data.redis. O TTL só
+  # é definido quando o hash é criado ou substituído (nunca renovado)
   cache:
     habilitado: ${CONSULTAS_CACHE_HABILITADO:true}
     ttl: ${CONSULTAS_CACHE_TTL:5m}

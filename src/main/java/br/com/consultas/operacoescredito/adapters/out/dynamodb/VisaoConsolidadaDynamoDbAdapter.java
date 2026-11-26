@@ -9,11 +9,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos;
+import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos.BlocoVersionado;
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos.BlocosEmCache;
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos.GravacaoDeBlocos;
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos.GravacaoDeCustodia;
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeCustodia;
 import br.com.consultas.operacoescredito.adapters.out.cache.ChaveDeOperacao;
+import br.com.consultas.operacoescredito.config.VisaoConsolidadaProperties;
 import br.com.consultas.operacoescredito.config.observabilidade.MetricasDeCustodia;
 import br.com.consultas.operacoescredito.config.observabilidade.Observacoes;
 import br.com.consultas.operacoescredito.application.port.out.FalhaNaFonteDeOperacoesException;
@@ -25,6 +27,7 @@ import br.com.consultas.operacoescredito.domain.CriterioConsulta;
 import br.com.consultas.operacoescredito.domain.Custodia;
 import br.com.consultas.operacoescredito.domain.OperacaoConsultada;
 import br.com.consultas.operacoescredito.domain.PrecedenciaDeCustodia;
+import br.com.consultas.operacoescredito.domain.VersaoDosBlocos;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.BatchGetItemResponse;
@@ -42,6 +45,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
@@ -72,13 +76,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Todos os blocos de uma operação vêm da mesma custódia, e ela volta no campo {@code custodia} do bloco
  * {@code operacao}.
  * <p>
- * <b>Versão única (ADR-0018).</b> Uma consulta nunca entrega blocos de versões do registro diferentes da mesma
- * operação. O {@code BatchGetItem} não é isolado das transações dos escritores, e a leitura eventualmente
- * consistente e o GSI podem estar atrasados: se os blocos de uma operação (os do cache, os do GSI e os da tabela
- * base) divergem, todos são relidos da tabela base com {@code ConsistentRead}, no máximo
- * {@value #MAX_RELEITURAS_CONSISTENTES} vezes; divergência que persiste, ou falta de prazo para reler, é
- * {@link VersaoDivergenteException} (503). Só vão ao cache blocos com versão em epoch ms; sem versão (ou fora do
- * formato), a consulta é respondida, mas nada é gravado.
+ * <b>Regra de versão dos blocos</b> ({@code consultas.visao-consolidada.versao-dos-blocos}, ADR-0019):
+ * <ul>
+ *     <li>{@link VersaoDosBlocos#UNICA} (ADR-0018): uma consulta nunca entrega blocos de versões do registro
+ *     diferentes da mesma operação. O {@code BatchGetItem} não é isolado das transações dos escritores, e a leitura
+ *     eventualmente consistente e o GSI podem estar atrasados: se os blocos de uma operação (os do cache, os do GSI e
+ *     os da tabela base) divergem, todos são relidos da tabela base com {@code ConsistentRead}, no máximo
+ *     {@value #MAX_RELEITURAS_CONSISTENTES} vezes; divergência que persiste, ou falta de prazo para reler, é
+ *     {@link VersaoDivergenteException} (503). Só vão ao cache blocos com versão em epoch ms; sem versão (ou fora do
+ *     formato), a consulta é respondida, mas nada é gravado;</li>
+ *     <li>{@link VersaoDosBlocos#POR_BLOCO}: cada bloco tem a sua versão e a consulta entrega os blocos como estão,
+ *     sem conferir versões nem reler. Vai ao cache cada bloco com versão em epoch ms, e a custódia, na versão do
+ *     bloco {@code operacao}.</li>
+ * </ul>
  * <p>
  * Resiliência ({@link ResilienciaDynamoDb}): a consulta passa pelos bulkheads do tipo de consulta e pelo rate
  * limiter; cada chamada ao SDK, pelo circuit breaker, com {@code apiCallTimeout} limitado ao que resta do
@@ -124,6 +134,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     private final CacheDeCustodia cacheDeCustodia;
     private final ResilienciaDynamoDb resiliencia;
     private final PrecedenciaDeCustodia precedencia;
+    private final VersaoDosBlocos versaoDosBlocos;
     private final MetricasDeCustodia metricas;
     private final Counter divergentesRelidas;
     private final Counter divergentesFalhas;
@@ -138,8 +149,11 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     VisaoConsolidadaDynamoDbAdapter(DynamoDbClient dynamoDb, DynamoDbProperties properties,
                                     ObservationRegistry observationRegistry, CacheDeBlocos cache,
                                     CacheDeCustodia cacheDeCustodia, ResilienciaDynamoDb resiliencia,
-                                    PrecedenciaDeCustodia precedencia, MeterRegistry meterRegistry) {
+                                    PrecedenciaDeCustodia precedencia, VisaoConsolidadaProperties visaoConsolidada,
+                                    MeterRegistry meterRegistry) {
         this.dynamoDb = dynamoDb;
+        this.versaoDosBlocos = visaoConsolidada.versaoDosBlocos();
+        log.info("Regra de versão dos blocos da visão consolidada: {}", versaoDosBlocos);
         this.observationRegistry = observationRegistry;
         this.cache = cache;
         this.cacheDeCustodia = cacheDeCustodia;
@@ -190,16 +204,15 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     }
 
     /**
-     * Os blocos na custódia lembrada: os do cache e, do DynamoDB, os que faltam. Se os do DynamoDB são de outra
-     * versão (o cache ficou para trás, ou a leitura eventual está atrasada), relê todos.
+     * Os blocos na custódia lembrada: os do cache e, do DynamoDB, os que faltam. Com versão única, se os do DynamoDB
+     * são de outra versão (o cache ficou para trás, ou a leitura eventual está atrasada), relê todos.
      *
      * @return vazio se a custódia não tem mais a operação
      */
     private Optional<Map<Bloco, ItemLido>> naCustodiaLembrada(long idOperacao, Custodia custodia, Set<Bloco> blocos,
                                                               Optional<BlocosEmCache> emCache) {
         var itens = new EnumMap<Bloco, ItemLido>(Bloco.class);
-        emCache.ifPresent(blocosDoHash -> blocosDoHash.blocos().forEach((bloco, textoDetalhe) ->
-                itens.put(bloco, new ItemLido(textoDetalhe, VersaoDoRegistro.doCache(blocosDoHash.versao())))));
+        emCache.ifPresent(blocosDoHash -> itens.putAll(doCache(blocosDoHash)));
         var ausentes = EnumSet.noneOf(Bloco.class);
         blocos.stream().filter(bloco -> !itens.containsKey(bloco)).forEach(ausentes::add);
         if (ausentes.isEmpty()) {
@@ -211,7 +224,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
         if (!itens.containsKey(Bloco.OPERACAO)) {
             return Optional.empty();
         }
-        if (versaoUnica(itens.values()).isEmpty()) {
+        if (divergem(itens)) {
             var relidos = releituraConsistente(idOperacao, custodia, blocos);
             relidos.ifPresent(todos -> gravarNoCache(idOperacao, custodia, todos, todos));
             return relidos;
@@ -243,7 +256,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
             metricas.duplicada(idOperacao, encontradas, vencedora.get());
         }
         var itens = porCustodia.get(vencedora.get());
-        if (versaoUnica(itens.values()).isEmpty()) {
+        if (divergem(itens)) {
             itens = releituraConsistente(idOperacao, vencedora.get(), blocos).orElseThrow(() ->
                     divergente("A operação " + idOperacao + " sumiu da custódia " + vencedora.get().codigo()
                             + " na releitura consistente"));
@@ -276,22 +289,21 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     }
 
     /**
-     * Grava no cache, se a versão estiver em epoch ms, os blocos lidos do DynamoDB e a custódia (na versão de
-     * {@code itens}, todos de uma versão só).
+     * Grava no cache os blocos lidos do DynamoDB e a custódia, só com versão em epoch ms ({@link #paraOCache},
+     * {@link #versaoDaCustodia}).
      */
     private void gravarNoCache(long idOperacao, Custodia custodia, Map<Bloco, ItemLido> itens,
                                Map<Bloco, ItemLido> lidosDoDynamoDb) {
-        var versao = versaoUnica(itens.values()).flatMap(unica -> {
-            var epoch = unica.epochMs();
-            return epoch.isPresent() ? Optional.of(epoch.getAsLong()) : Optional.empty();
-        });
-        if (versao.isEmpty()) {
+        var paraOCache = paraOCache(itens, lidosDoDynamoDb);
+        var versaoDaCustodia = versaoDaCustodia(itens);
+        if (paraOCache.isEmpty() && versaoDaCustodia.isEmpty()) {
             log.debug("Operação {} sem versão do registro em epoch ms; nada gravado no cache", idOperacao);
             return;
         }
-        cache.gravar(List.of(new GravacaoDeBlocos(new ChaveDeOperacao(idOperacao, custodia), versao.get(),
-                        textos(lidosDoDynamoDb))),
-                List.of(new GravacaoDeCustodia(idOperacao, custodia, versao.get())));
+        cache.gravar(List.of(new GravacaoDeBlocos(new ChaveDeOperacao(idOperacao, custodia), paraOCache)),
+                versaoDaCustodia.isPresent()
+                        ? List.of(new GravacaoDeCustodia(idOperacao, custodia, versaoDaCustodia.getAsLong()))
+                        : List.of());
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -329,8 +341,8 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
             var requisicao = QueryRequest.builder()
                     .tableName(tabela)
                     .indexName(indice)
-                    .keyConditionExpression("#chave = :valor")
                     .expressionAttributeNames(Map.of("#chave", atributo))
+                    .keyConditionExpression("#chave = :valor")
                     .expressionAttributeValues(Map.of(":valor", AttributeValue.fromS(valor)))
                     .scanIndexForward(false)
                     .projectionExpression(PROJECAO)
@@ -373,10 +385,10 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     }
 
     /**
-     * Os blocos de operações de custódia conhecida, numa versão só por operação: o {@code operacao} do GSI, os
-     * demais do cache (só se estiverem lá na versão do GSI) e, da tabela base, os ausentes, cada operação na sua
-     * custódia. Operações com versões divergentes são relidas inteiras com {@code ConsistentRead}. Os blocos lidos
-     * da tabela base (exceto o {@code operacao}) e as custódias vão ao cache.
+     * Os blocos de operações de custódia conhecida: o {@code operacao} do GSI, os demais do cache e, da tabela base,
+     * os ausentes, cada operação na sua custódia. Com versão única, numa versão só por operação: do cache, só os
+     * blocos na versão do GSI, e operações com versões divergentes são relidas inteiras com {@code ConsistentRead}.
+     * Os blocos lidos da tabela base (exceto o {@code operacao}) e as custódias vão ao cache.
      *
      * @return itens por operação e bloco; blocos inexistentes ficam ausentes
      */
@@ -388,18 +400,22 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
 
         var itens = new HashMap<Long, Map<Bloco, ItemLido>>();
         var custodias = new HashMap<Long, Custodia>();
-        var versoesConhecidas = new HashMap<ChaveDeOperacao, Long>();
+        var versoesExigidas = new HashMap<ChaveDeOperacao, OptionalLong>();
         for (var operacao : operacoes) {
             var doIndice = new EnumMap<Bloco, ItemLido>(Bloco.class);
             doIndice.put(Bloco.OPERACAO, operacao.operacao());
             itens.put(operacao.idOperacao(), doIndice);
             custodias.put(operacao.idOperacao(), operacao.custodia());
-            operacao.operacao().versao().epochMs().ifPresent(epoch ->
-                    versoesConhecidas.put(new ChaveDeOperacao(operacao.idOperacao(), operacao.custodia()), epoch));
+            var chave = new ChaveDeOperacao(operacao.idOperacao(), operacao.custodia());
+            var doGsi = operacao.operacao().versao().epochMs();
+            if (versaoDosBlocos == VersaoDosBlocos.POR_BLOCO) {
+                versoesExigidas.put(chave, OptionalLong.empty());
+            } else if (doGsi.isPresent()) {
+                versoesExigidas.put(chave, doGsi);
+            }
         }
-        cache.buscar(versoesConhecidas, demaisBlocos).forEach((chave, blocosDoHash) ->
-                blocosDoHash.blocos().forEach((bloco, textoDetalhe) -> itens.get(chave.idOperacao()).put(bloco,
-                        new ItemLido(textoDetalhe, VersaoDoRegistro.doCache(blocosDoHash.versao())))));
+        cache.buscar(versoesExigidas, demaisBlocos).forEach((chave, blocosDoHash) ->
+                itens.get(chave.idOperacao()).putAll(doCache(blocosDoHash)));
 
         var ausentes = new ArrayList<ChaveNoDynamoDb>();
         for (var operacao : operacoes) {
@@ -420,7 +436,7 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
 
         var divergentes = new LinkedHashMap<Long, Custodia>();
         itens.forEach((idOperacao, daOperacao) -> {
-            if (versaoUnica(daOperacao.values()).isEmpty()) {
+            if (divergem(daOperacao)) {
                 divergentes.put(idOperacao, custodias.get(idOperacao));
             }
         });
@@ -467,7 +483,8 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
 
     /**
      * Grava no cache os blocos lidos da tabela base, exceto o {@code operacao} (que veio do GSI e é relido a cada
-     * consulta), e a custódia de cada operação, com a versão da operação, se estiver em epoch ms.
+     * consulta), e a custódia de cada operação, só com versão em epoch ms ({@link #paraOCache},
+     * {@link #versaoDaCustodia}).
      */
     private void gravarNoCache(List<OperacaoDoIndice> operacoes, Map<Long, Map<Bloco, ItemLido>> itens,
                                Map<Long, Map<Bloco, ItemLido>> lidosDoDynamoDb) {
@@ -475,18 +492,15 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
         var custodias = new ArrayList<GravacaoDeCustodia>();
         for (var operacao : operacoes) {
             var idOperacao = operacao.idOperacao();
-            var epoch = versaoUnica(itens.get(idOperacao).values()).map(VersaoDoRegistro::epochMs);
-            if (epoch.isEmpty() || epoch.get().isEmpty()) {
-                continue;
-            }
-            var versao = epoch.get().getAsLong();
-            custodias.add(new GravacaoDeCustodia(idOperacao, operacao.custodia(), versao));
+            var daOperacao = itens.get(idOperacao);
+            versaoDaCustodia(daOperacao).ifPresent(versao ->
+                    custodias.add(new GravacaoDeCustodia(idOperacao, operacao.custodia(), versao)));
             var lidos = new EnumMap<Bloco, ItemLido>(Bloco.class);
             lidos.putAll(lidosDoDynamoDb.getOrDefault(idOperacao, Map.of()));
             lidos.remove(Bloco.OPERACAO);
-            if (!lidos.isEmpty()) {
-                blocos.add(new GravacaoDeBlocos(new ChaveDeOperacao(idOperacao, operacao.custodia()), versao,
-                        textos(lidos)));
+            var paraOCache = paraOCache(daOperacao, lidos);
+            if (!paraOCache.isEmpty()) {
+                blocos.add(new GravacaoDeBlocos(new ChaveDeOperacao(idOperacao, operacao.custodia()), paraOCache));
             }
         }
         cache.gravar(blocos, custodias);
@@ -495,6 +509,49 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
     // ---------------------------------------------------------------------------------------------------------
     // Versão do registro
     // ---------------------------------------------------------------------------------------------------------
+
+    /** Com versão única, os blocos da operação não estão todos numa versão só; com versão por bloco, nunca. */
+    private boolean divergem(Map<Bloco, ItemLido> itens) {
+        return versaoDosBlocos == VersaoDosBlocos.UNICA && versaoUnica(itens.values()).isEmpty();
+    }
+
+    /**
+     * Versão (epoch ms) com que a custódia vai ao cache: com versão única, a de todos os blocos da operação; com
+     * versão por bloco, a do bloco {@code operacao} (ADR-0019). Vazia se não houver, ou se não estiver em epoch ms.
+     */
+    private OptionalLong versaoDaCustodia(Map<Bloco, ItemLido> itens) {
+        if (versaoDosBlocos == VersaoDosBlocos.UNICA) {
+            return versaoUnica(itens.values()).map(VersaoDoRegistro::epochMs).orElse(OptionalLong.empty());
+        }
+        var operacao = itens.get(Bloco.OPERACAO);
+        return operacao == null ? OptionalLong.empty() : operacao.versao().epochMs();
+    }
+
+    /**
+     * Os blocos {@code lidos} que podem ir ao cache, com a versão de cada um: com versão única, todos, na versão de
+     * {@code itens}, e nenhum se ela não estiver em epoch ms; com versão por bloco, cada um que tiver a sua versão em
+     * epoch ms.
+     */
+    private Map<Bloco, BlocoVersionado> paraOCache(Map<Bloco, ItemLido> itens, Map<Bloco, ItemLido> lidos) {
+        var paraOCache = new EnumMap<Bloco, BlocoVersionado>(Bloco.class);
+        if (versaoDosBlocos == VersaoDosBlocos.UNICA) {
+            var unica = versaoUnica(itens.values()).map(VersaoDoRegistro::epochMs).orElse(OptionalLong.empty());
+            unica.ifPresent(versao -> lidos.forEach((bloco, item) ->
+                    paraOCache.put(bloco, new BlocoVersionado(versao, item.textoDetalhe()))));
+            return paraOCache;
+        }
+        lidos.forEach((bloco, item) -> item.versao().epochMs().ifPresent(versao ->
+                paraOCache.put(bloco, new BlocoVersionado(versao, item.textoDetalhe()))));
+        return paraOCache;
+    }
+
+    /** Os blocos de um hash do cache, cada um com a sua versão. */
+    private static Map<Bloco, ItemLido> doCache(BlocosEmCache blocosDoHash) {
+        var itens = new EnumMap<Bloco, ItemLido>(Bloco.class);
+        blocosDoHash.blocos().forEach((bloco, versionado) -> itens.put(bloco,
+                new ItemLido(versionado.textoDetalhe(), VersaoDoRegistro.doCache(versionado.versao()))));
+        return itens;
+    }
 
     /** A versão comum a todos os itens, se houver uma só; vazio se divergem (ou se não há itens). */
     private static Optional<VersaoDoRegistro> versaoUnica(Collection<ItemLido> itens) {
@@ -541,12 +598,6 @@ class VisaoConsolidadaDynamoDbAdapter implements FonteDeOperacoes {
             conteudo.put(bloco, item == null ? null : codec.decodificar(item.textoDetalhe()));
         });
         return OperacaoConsultada.naCustodia(custodia, conteudo);
-    }
-
-    private static Map<Bloco, byte[]> textos(Map<Bloco, ItemLido> itens) {
-        var textos = new EnumMap<Bloco, byte[]>(Bloco.class);
-        itens.forEach((bloco, item) -> textos.put(bloco, item.textoDetalhe()));
-        return textos;
     }
 
     private static List<ChaveNoDynamoDb> chaves(long idOperacao, Set<Custodia> custodias, Set<Bloco> blocos) {

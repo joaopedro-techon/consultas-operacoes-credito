@@ -1,11 +1,13 @@
 package br.com.consultas.operacoescredito.adapters.out.cache;
 
+import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos.BlocoVersionado;
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos.GravacaoDeBlocos;
 import br.com.consultas.operacoescredito.adapters.out.cache.CacheDeBlocos.GravacaoDeCustodia;
 import br.com.consultas.operacoescredito.config.observabilidade.CacheDaRequisicao;
 import br.com.consultas.operacoescredito.config.resiliencia.PrazoDaRequisicao;
 import br.com.consultas.operacoescredito.domain.Bloco;
 import br.com.consultas.operacoescredito.domain.Custodia;
+import br.com.consultas.operacoescredito.domain.VersaoDosBlocos;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -21,6 +23,7 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -99,8 +102,8 @@ class ValkeyCacheDeBlocosTest {
             assertThat(lembrada.versao()).isEqualTo(VERSAO);
         });
         assertThat(leitura.blocos()).hasValueSatisfying(blocos -> {
-            assertThat(blocos.versao()).isEqualTo(VERSAO);
-            assertThat(texto(blocos.blocos().get(Bloco.OPERACAO))).isEqualTo("da NSF");
+            assertThat(blocos.blocos().get(Bloco.OPERACAO).versao()).isEqualTo(VERSAO);
+            assertThat(texto(blocos.blocos().get(Bloco.OPERACAO).textoDetalhe())).isEqualTo("da NSF");
             assertThat(blocos.blocos()).doesNotContainKey(Bloco.PARCELAS);
         });
         assertThat(metrica("hit")).isEqualTo(1);
@@ -124,7 +127,7 @@ class ValkeyCacheDeBlocosTest {
         var cache = cache(Runnable::run, 500);
         var blocos = new ArrayList<GravacaoDeBlocos>();
         for (int id = 1; id <= 250; id++) {
-            blocos.add(new GravacaoDeBlocos(new ChaveDeOperacao(id, Custodia.SF), VERSAO,
+            blocos.add(GravacaoDeBlocos.naVersao(new ChaveDeOperacao(id, Custodia.SF), VERSAO,
                     Map.of(Bloco.PARCELAS, bytes("x"))));
         }
 
@@ -239,12 +242,84 @@ class ValkeyCacheDeBlocosTest {
         assertThat(circuitBreaker.getMetrics().getNumberOfFailedCalls()).isEqualTo(1);
     }
 
+    // ---------------------------------------------------------------------------------------------------------
+    // Versão por bloco (ADR-0019)
+    // ---------------------------------------------------------------------------------------------------------
+
+    @Test
+    void comVersaoPorBlocoCadaBlocoValeSozinhoSemExigirVersao() {
+        var cache = cache(Runnable::run, 500, VersaoDosBlocos.POR_BLOCO);
+        valkey.hash("opb:1:SF", Map.of(
+                "parcelas", "p", "v:parcelas", Long.toString(VERSAO),
+                "saldo", "s", "v:saldo", Long.toString(VERSAO + 7),
+                "amortizacoes", "a", "v:amortizacoes", Long.toString(VERSAO), "m:amortizacoes", "1",
+                "recebimentos", "r"));
+        // Hash de versão única da mesma operação: ignorado com versão por bloco
+        valkey.hash("op:1:SF", Map.of("versao", Long.toString(VERSAO), "plano", "x"));
+
+        var encontrados = cache.buscar(Map.of(new ChaveDeOperacao(1, Custodia.SF), OptionalLong.empty()),
+                EnumSet.of(Bloco.PARCELAS, Bloco.SALDO, Bloco.AMORTIZACOES, Bloco.RECEBIMENTOS, Bloco.PLANO));
+
+        assertThat(encontrados.get(new ChaveDeOperacao(1, Custodia.SF)).blocos()).satisfies(blocos -> {
+            assertThat(blocos).as("com marcador, sem versão ou só no hash de versão única: ausente")
+                    .containsOnlyKeys(Bloco.PARCELAS, Bloco.SALDO);
+            assertThat(blocos.get(Bloco.PARCELAS).versao()).isEqualTo(VERSAO);
+            assertThat(blocos.get(Bloco.SALDO).versao()).isEqualTo(VERSAO + 7);
+        });
+        assertThat(metrica("hit")).isEqualTo(2);
+        assertThat(metrica("miss")).isEqualTo(3);
+    }
+
+    @Test
+    void comVersaoPorBlocoAConsultaPorOperacaoLeOHashPorBlocoDaCustodiaLembrada() {
+        var cache = cache(Runnable::run, 500, VersaoDosBlocos.POR_BLOCO);
+        valkey.hash("custodia-vc:1", Map.of("custodia", "F5", "versao", Long.toString(VERSAO)));
+        valkey.hash("opb:1:F5", Map.of("originacao", "o", "v:originacao", Long.toString(VERSAO - 100)));
+
+        var leitura = cache.buscarOperacao(1, EnumSet.of(Bloco.OPERACAO, Bloco.ORIGINACAO));
+
+        assertThat(leitura.blocos()).hasValueSatisfying(blocos -> {
+            assertThat(blocos.blocos()).containsOnlyKeys(Bloco.ORIGINACAO);
+            assertThat(blocos.blocos().get(Bloco.ORIGINACAO).versao()).isEqualTo(VERSAO - 100);
+        });
+    }
+
+    @Test
+    void comVersaoPorBlocoAGravacaoLevaAVersaoDeCadaBloco() {
+        var cache = cache(Runnable::run, 500, VersaoDosBlocos.POR_BLOCO);
+
+        cache.gravar(List.of(new GravacaoDeBlocos(new ChaveDeOperacao(1, Custodia.SF),
+                Map.of(Bloco.PARCELAS, new BlocoVersionado(VERSAO, bytes("p"))))), List.of());
+
+        assertThat(valkey.scripts()).singleElement().satisfies(script -> {
+            assertThat(script.sha1()).isEqualTo(ScriptValkey.GRAVAR_POR_BLOCO.sha1());
+            assertThat(script.chave()).isEqualTo("opb:1:SF");
+            assertThat(script.argumentos()).containsExactly(Long.toString(Duration.ofMinutes(5).toMillis()),
+                    "parcelas", Long.toString(VERSAO), "p");
+        });
+    }
+
+    @Test
+    void comVersaoUnicaBlocosDeVersoesDiferentesNaoSaoGravados() {
+        var cache = cache(Runnable::run, 500);
+
+        cache.gravar(List.of(new GravacaoDeBlocos(new ChaveDeOperacao(1, Custodia.SF), Map.of(
+                Bloco.PARCELAS, new BlocoVersionado(VERSAO, bytes("p")),
+                Bloco.SALDO, new BlocoVersionado(VERSAO + 1, bytes("s"))))), List.of());
+
+        assertThat(valkey.scripts()).isEmpty();
+    }
+
     private ValkeyCacheDeBlocos cache(Executor gravacoes, int maxChavesPorConsulta) {
+        return cache(gravacoes, maxChavesPorConsulta, VersaoDosBlocos.UNICA);
+    }
+
+    private ValkeyCacheDeBlocos cache(Executor gravacoes, int maxChavesPorConsulta, VersaoDosBlocos versaoDosBlocos) {
         // Uma gravação em andamento por vez
         var properties = new CacheProperties(true, Duration.ofMinutes(5), 100, maxChavesPorConsulta,
                 Duration.ofMillis(20), 1, Duration.ofHours(24));
-        return new ValkeyCacheDeBlocos(valkey, circuitBreaker, ObservationRegistry.NOOP, metricas, properties,
-                TIMEOUT_COMANDO, gravacoes);
+        return new ValkeyCacheDeBlocos(valkey, versaoDosBlocos, circuitBreaker, ObservationRegistry.NOOP, metricas,
+                properties, TIMEOUT_COMANDO, gravacoes);
     }
 
     private double metrica(String resultado) {
@@ -252,16 +327,16 @@ class ValkeyCacheDeBlocosTest {
                 .mapToDouble(contador -> contador.count()).sum();
     }
 
-    private static Map<ChaveDeOperacao, Long> versoes(int quantidade) {
-        var versoes = new HashMap<ChaveDeOperacao, Long>();
+    private static Map<ChaveDeOperacao, OptionalLong> versoes(int quantidade) {
+        var versoes = new HashMap<ChaveDeOperacao, OptionalLong>();
         for (int i = 1; i <= quantidade; i++) {
-            versoes.put(new ChaveDeOperacao(i, Custodia.SF), VERSAO);
+            versoes.put(new ChaveDeOperacao(i, Custodia.SF), OptionalLong.of(VERSAO));
         }
         return versoes;
     }
 
     private static GravacaoDeBlocos umaGravacao() {
-        return new GravacaoDeBlocos(new ChaveDeOperacao(1, Custodia.SF), VERSAO, Map.of(Bloco.PARCELAS, bytes("x")));
+        return GravacaoDeBlocos.naVersao(new ChaveDeOperacao(1, Custodia.SF), VERSAO, Map.of(Bloco.PARCELAS, bytes("x")));
     }
 
     private static byte[] bytes(String valor) {
@@ -272,8 +347,8 @@ class ValkeyCacheDeBlocosTest {
         return new String(valor, StandardCharsets.UTF_8);
     }
 
-    /** Um script executado: a chave e os argumentos, como texto. */
-    private record ScriptExecutado(String chave, List<String> argumentos) {
+    /** Um script executado: o SHA-1, a chave e os argumentos, como texto. */
+    private record ScriptExecutado(String sha1, String chave, List<String> argumentos) {
     }
 
     /**
@@ -364,7 +439,7 @@ class ValkeyCacheDeBlocosTest {
             for (var argumento : argumentos) {
                 textos.add(texto(argumento));
             }
-            scripts.add(new ScriptExecutado(texto(chave), textos));
+            scripts.add(new ScriptExecutado(script.sha1(), texto(chave), textos));
             return responder(1L);
         }
 

@@ -11,11 +11,13 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 
+import br.com.consultas.operacoescredito.config.VisaoConsolidadaProperties;
 import br.com.consultas.operacoescredito.domain.Bloco;
 
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.Executors;
 
@@ -35,7 +37,8 @@ class CacheConfig {
     }
 
     @Bean
-    CacheDeBlocosECustodia cacheDeBlocos(CacheProperties properties, ObjectProvider<RedisConnectionFactory> conexoes,
+    CacheDeBlocosECustodia cacheDeBlocos(CacheProperties properties, VisaoConsolidadaProperties visaoConsolidada,
+                                ObjectProvider<RedisConnectionFactory> conexoes,
                                 CircuitBreakerRegistry circuitBreakers, ObservationRegistry observationRegistry,
                                 MeterRegistry meterRegistry) {
         if (!properties.habilitado()) {
@@ -51,7 +54,7 @@ class CacheConfig {
                     + "timeouts do Valkey encurtados pelo prazo da requisição contariam no circuito",
                     properties.prazoMinimoRestante(), timeoutComando);
         }
-        return new ValkeyCacheDeBlocos(ComandosValkey.lettuce(fabrica),
+        return new ValkeyCacheDeBlocos(ComandosValkey.lettuce(fabrica), visaoConsolidada.versaoDosBlocos(),
                 circuitBreakers.circuitBreaker(CIRCUIT_BREAKER), observationRegistry, meterRegistry, properties,
                 timeoutComando, Executors.newThreadPerTaskExecutor(
                         Thread.ofVirtual().name("valkey-gravacao-", 0).factory()));
@@ -66,7 +69,8 @@ class CacheConfig {
         }
 
         @Override
-        public Map<ChaveDeOperacao, BlocosEmCache> buscar(Map<ChaveDeOperacao, Long> versoes, Set<Bloco> blocos) {
+        public Map<ChaveDeOperacao, BlocosEmCache> buscar(Map<ChaveDeOperacao, OptionalLong> versoesExigidas,
+                                                          Set<Bloco> blocos) {
             return Map.of();
         }
 
